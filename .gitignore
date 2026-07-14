@@ -1,0 +1,7 @@
+/target
+
+# Local convoy/ding runtime files for this workspace.
+/CLAUDE.md
+/DING-BUS.md
+/PERSONA.md
+/pty.toml
