@@ -8,7 +8,10 @@ use std::{
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use fabric::{
-    config::{FabricHome, PeerBook, load_or_create_identity, parse_addr_json, parse_node_id},
+    config::{
+        FabricHome, PeerBook, generate_identity_file, load_or_create_identity, parse_addr_json,
+        parse_node_id,
+    },
     control::{ControlRequest, ControlResponse},
     daemon::{run_daemon, send_control},
 };
@@ -26,6 +29,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Manage fabric identity key files.
+    Key {
+        #[command(subcommand)]
+        command: KeyCommands,
+    },
     /// Print this node's stable iroh NodeID.
     Id,
     /// Print the running daemon's current EndpointAddr as JSON.
@@ -65,87 +73,108 @@ enum Commands {
     Daemon,
 }
 
+#[derive(Debug, Subcommand)]
+enum KeyCommands {
+    /// Generate an identity file without starting a daemon.
+    Gen {
+        /// Path to write the identity file.
+        #[arg(long)]
+        out: PathBuf,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let home = FabricHome::resolve(cli.home)?;
 
     match cli.command {
-        Commands::Id => {
-            let key = load_or_create_identity(&home)?;
-            println!("{}", key.public());
-        }
-        Commands::Addr => match send_control(&home, ControlRequest::Status).await? {
-            ControlResponse::Status { endpoint_addr, .. } => {
-                println!("{}", serde_json::to_string(&endpoint_addr)?);
-            }
-            response => bail!("unexpected daemon response: {response:?}"),
-        },
-        Commands::Peers => {
-            let book = PeerBook::load(&home)?;
-            for peer in book.peers() {
-                match &peer.name {
-                    Some(name) => println!("{}\t{}", peer.id, name),
-                    None => println!("{}", peer.id),
-                }
-            }
-        }
-        Commands::Add {
-            nodeid,
-            name,
-            addr_json,
+        Commands::Key {
+            command: KeyCommands::Gen { out },
         } => {
-            let id = parse_node_id(&nodeid)?;
-            let addr = parse_addr_json(addr_json.as_deref(), id)?;
-            let mut book = PeerBook::load(&home)?;
-            book.add(id, name, addr);
-            book.save(&home)?;
-            let _ = send_control(&home, ControlRequest::ReloadPeers).await;
+            let id = generate_identity_file(&out)?;
+            println!("{id}");
         }
-        Commands::Remove { peer } => {
-            let mut book = PeerBook::load(&home)?;
-            if !book.remove(&peer) {
-                bail!("peer {peer:?} is not trusted");
-            }
-            book.save(&home)?;
-            let _ = send_control(&home, ControlRequest::ReloadPeers).await;
-        }
-        Commands::Up { foreground } => {
-            if foreground {
-                run_daemon(home).await?;
-            } else {
-                spawn_daemon(&home).await?;
-            }
-        }
-        Commands::Down => {
-            send_control(&home, ControlRequest::Shutdown).await?;
-            println!("stopped");
-        }
-        Commands::Expose { protocol, socket } => {
-            send_control(&home, ControlRequest::Expose { protocol, socket }).await?;
-            println!("exposed");
-        }
-        Commands::Dial { peer, protocol } => {
-            match send_control(&home, ControlRequest::Dial { peer, protocol }).await? {
-                ControlResponse::Dial { socket } => println!("{}", socket.display()),
-                response => bail!("unexpected daemon response: {response:?}"),
-            }
-        }
-        Commands::Ping { peer } => {
-            match send_control(&home, ControlRequest::Ping { peer }).await? {
-                ControlResponse::Pong {
-                    peer,
-                    bytes,
-                    round_trip_micros,
-                } => {
-                    let millis = round_trip_micros as f64 / 1000.0;
-                    println!("pong from {peer}: {bytes} bytes in {millis:.3} ms");
+        command => {
+            let home = FabricHome::resolve(cli.home)?;
+            match command {
+                Commands::Key { .. } => unreachable!("key commands are handled before home setup"),
+                Commands::Id => {
+                    let key = load_or_create_identity(&home)?;
+                    println!("{}", key.public());
                 }
-                response => bail!("unexpected daemon response: {response:?}"),
+                Commands::Addr => match send_control(&home, ControlRequest::Status).await? {
+                    ControlResponse::Status { endpoint_addr, .. } => {
+                        println!("{}", serde_json::to_string(&endpoint_addr)?);
+                    }
+                    response => bail!("unexpected daemon response: {response:?}"),
+                },
+                Commands::Peers => {
+                    let book = PeerBook::load(&home)?;
+                    for peer in book.peers() {
+                        match &peer.name {
+                            Some(name) => println!("{}\t{}", peer.id, name),
+                            None => println!("{}", peer.id),
+                        }
+                    }
+                }
+                Commands::Add {
+                    nodeid,
+                    name,
+                    addr_json,
+                } => {
+                    let id = parse_node_id(&nodeid)?;
+                    let addr = parse_addr_json(addr_json.as_deref(), id)?;
+                    let mut book = PeerBook::load(&home)?;
+                    book.add(id, name, addr);
+                    book.save(&home)?;
+                    let _ = send_control(&home, ControlRequest::ReloadPeers).await;
+                }
+                Commands::Remove { peer } => {
+                    let mut book = PeerBook::load(&home)?;
+                    if !book.remove(&peer) {
+                        bail!("peer {peer:?} is not trusted");
+                    }
+                    book.save(&home)?;
+                    let _ = send_control(&home, ControlRequest::ReloadPeers).await;
+                }
+                Commands::Up { foreground } => {
+                    if foreground {
+                        run_daemon(home).await?;
+                    } else {
+                        spawn_daemon(&home).await?;
+                    }
+                }
+                Commands::Down => {
+                    send_control(&home, ControlRequest::Shutdown).await?;
+                    println!("stopped");
+                }
+                Commands::Expose { protocol, socket } => {
+                    send_control(&home, ControlRequest::Expose { protocol, socket }).await?;
+                    println!("exposed");
+                }
+                Commands::Dial { peer, protocol } => {
+                    match send_control(&home, ControlRequest::Dial { peer, protocol }).await? {
+                        ControlResponse::Dial { socket } => println!("{}", socket.display()),
+                        response => bail!("unexpected daemon response: {response:?}"),
+                    }
+                }
+                Commands::Ping { peer } => {
+                    match send_control(&home, ControlRequest::Ping { peer }).await? {
+                        ControlResponse::Pong {
+                            peer,
+                            bytes,
+                            round_trip_micros,
+                        } => {
+                            let millis = round_trip_micros as f64 / 1000.0;
+                            println!("pong from {peer}: {bytes} bytes in {millis:.3} ms");
+                        }
+                        response => bail!("unexpected daemon response: {response:?}"),
+                    }
+                }
+                Commands::Daemon => {
+                    run_daemon(home).await?;
+                }
             }
-        }
-        Commands::Daemon => {
-            run_daemon(home).await?;
         }
     }
 

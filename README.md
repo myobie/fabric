@@ -66,7 +66,7 @@ cargo run -- <command>
 
 ## State
 
-By default fabric stores local state in:
+By default fabric stores local runtime state in:
 
 ```text
 ~/.local/share/fabric
@@ -78,7 +78,26 @@ machine.
 The identity file contains the persisted iroh secret key. The public key is the
 node's stable NodeID.
 
+Trusted peers are declarative config. With the default home, fabric reads and
+writes:
+
+```text
+~/.config/fabric/peers.toml
+```
+
+If `--home <dir>` or `FABRIC_HOME=<dir>` is set, fabric reads and writes
+`<dir>/peers.toml` instead. The daemon loads this file on `fabric up`; it is the
+endpoint allow-list.
+
 ## Commands
+
+```sh
+fabric key gen --out <path>
+```
+
+Generate an identity file without a running daemon and print its public NodeID.
+The output file is in the same format as `<home>/identity.toml`, so it can be
+pre-installed onto another machine before that machine ever starts fabric.
 
 ```sh
 fabric id
@@ -148,6 +167,58 @@ Connectivity and trust test. `fabric ping` dials the peer's built-in
 ACL-gated echo protocol, sends a random nonce, verifies the same bytes come
 back, and prints the round-trip latency. Use this first when bringing up a new
 machine.
+
+## Declarative Peer Config
+
+`peers.toml` is intentionally human-editable. The minimal form is:
+
+```toml
+[[peers]]
+id = "peer-node-id-hex"
+name = "workstation"
+```
+
+`name` is optional. Address hints are optional too; normal key-only dialing uses
+iroh address lookup. Local deterministic tests can include the address-hint TOML
+that `fabric add <nodeid> <name> --addr-json "$(fabric addr)"` writes.
+
+## Provision And Go
+
+Pre-generate a box identity on a trusted machine:
+
+```sh
+BOX_ID=$(fabric key gen --out box-identity.toml)
+printf '%s\n' "$BOX_ID"
+```
+
+Write the new box's `peers.toml` with the peers it should trust:
+
+```toml
+[[peers]]
+id = "existing-machine-node-id"
+name = "workstation"
+```
+
+Pre-add the new box NodeID to the existing machines, either with `fabric add` or
+by editing their `peers.toml`:
+
+```sh
+fabric add "$BOX_ID" new-box
+```
+
+Install the generated identity and peer config on the new box before first boot.
+For the default paths:
+
+```sh
+mkdir -p ~/.local/share/fabric ~/.config/fabric
+install -m 600 box-identity.toml ~/.local/share/fabric/identity.toml
+install -m 644 peers.toml ~/.config/fabric/peers.toml
+fabric up
+fabric ping workstation
+```
+
+If provisioning with `FABRIC_HOME=/path/to/fabric`, put both files in that
+directory as `identity.toml` and `peers.toml`.
 
 ## Local Two-Node Test
 

@@ -13,24 +13,38 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone)]
 pub struct FabricHome {
     root: PathBuf,
+    peer_config_path: PathBuf,
+    legacy_peer_config_path: Option<PathBuf>,
 }
 
 impl FabricHome {
     pub fn resolve(home: Option<PathBuf>) -> Result<Self> {
         if let Some(root) = home {
-            return Ok(Self { root });
+            return Ok(Self::new(root));
         }
         if let Some(root) = env::var_os("FABRIC_HOME") {
-            return Ok(Self { root: root.into() });
+            return Ok(Self::new(root));
         }
         let home = env::var_os("HOME").context("HOME is not set; pass --home or FABRIC_HOME")?;
+        let home = PathBuf::from(home);
+        let root = home.join(".local/share/fabric");
+        let config_root = env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"));
         Ok(Self {
-            root: PathBuf::from(home).join(".local/share/fabric"),
+            peer_config_path: config_root.join("fabric/peers.toml"),
+            legacy_peer_config_path: Some(root.join("peers.toml")),
+            root,
         })
     }
 
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        let root = root.into();
+        Self {
+            peer_config_path: root.join("peers.toml"),
+            legacy_peer_config_path: None,
+            root,
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -41,6 +55,11 @@ impl FabricHome {
         fs::create_dir_all(self.root.join("run"))?;
         fs::create_dir_all(self.root.join("dials"))?;
         fs::create_dir_all(self.root.join("logs"))?;
+        if let Some(parent) = self.peer_config_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
+        }
         Ok(())
     }
 
@@ -49,7 +68,17 @@ impl FabricHome {
     }
 
     pub fn peers_path(&self) -> PathBuf {
-        self.root.join("peers.toml")
+        self.peer_config_path.clone()
+    }
+
+    fn existing_peers_path(&self) -> Option<PathBuf> {
+        if self.peer_config_path.exists() {
+            return Some(self.peer_config_path.clone());
+        }
+        self.legacy_peer_config_path
+            .as_ref()
+            .filter(|path| path.exists())
+            .cloned()
     }
 
     pub fn control_socket_path(&self) -> PathBuf {
@@ -85,12 +114,31 @@ pub fn load_or_create_identity(home: &FabricHome) -> Result<SecretKey> {
         return Ok(file.secret_key);
     }
 
-    let file = IdentityFile {
-        secret_key: SecretKey::generate(),
-    };
+    let file = IdentityFile::generate();
     let raw = toml::to_string_pretty(&file)?;
     write_secret_file(&path, raw.as_bytes())?;
     Ok(file.secret_key)
+}
+
+pub fn generate_identity_file(path: &Path) -> Result<EndpointId> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let file = IdentityFile::generate();
+    let id = file.secret_key.public();
+    let raw = toml::to_string_pretty(&file)?;
+    write_secret_file(path, raw.as_bytes())?;
+    Ok(id)
+}
+
+impl IdentityFile {
+    fn generate() -> Self {
+        Self {
+            secret_key: SecretKey::generate(),
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -132,10 +180,9 @@ pub struct PeerBook {
 
 impl PeerBook {
     pub fn load(home: &FabricHome) -> Result<Self> {
-        let path = home.peers_path();
-        if !path.exists() {
+        let Some(path) = home.existing_peers_path() else {
             return Ok(Self::default());
-        }
+        };
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
         let book: Self =

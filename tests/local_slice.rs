@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::Result;
 use fabric::{
-    config::{FabricHome, PeerBook},
+    config::{FabricHome, PeerBook, generate_identity_file},
     daemon::FabricNode,
 };
 use tempfile::TempDir;
@@ -107,6 +107,36 @@ async fn local_expose_dial_round_trips_and_acl_rejects_unknown_node() -> Result<
 
     echo_task.abort();
     node_c.shutdown().await?;
+    node_b.shutdown().await?;
+    node_a.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn declarative_peer_config_is_loaded_on_start() -> Result<()> {
+    let node_a_dir = TempDir::new()?;
+    let node_b_dir = TempDir::new()?;
+    let node_a_home = FabricHome::new(node_a_dir.path());
+    let node_b_home = FabricHome::new(node_b_dir.path());
+
+    let node_b_id = generate_identity_file(&node_b_home.identity_path())?;
+    fs::write(
+        node_a_home.peers_path(),
+        format!("[[peers]]\nid = \"{node_b_id}\"\nname = \"node-b\"\n"),
+    )?;
+
+    let node_a = FabricNode::start(node_a_home.clone()).await?;
+
+    let mut node_b_peers = PeerBook::default();
+    node_b_peers.add(node_a.id(), Some("node-a".to_string()), Some(node_a.addr()));
+    node_b_peers.save(&node_b_home)?;
+
+    let node_b = FabricNode::start(node_b_home).await?;
+    assert_eq!(node_b.id(), node_b_id);
+
+    let ping = node_b.ping("node-a").await?;
+    assert_eq!(ping.bytes, 32);
+
     node_b.shutdown().await?;
     node_a.shutdown().await?;
     Ok(())
