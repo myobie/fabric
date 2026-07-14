@@ -11,6 +11,7 @@ pub enum ControlRequest {
     Expose { protocol: String, socket: PathBuf },
     Dial { peer: String, protocol: String },
     Ping { peer: String },
+    Shell { peer: String },
     Shutdown,
 }
 
@@ -32,6 +33,9 @@ pub enum ControlResponse {
         peers: Vec<PeerReachability>,
     },
     Dial {
+        socket: PathBuf,
+    },
+    Shell {
         socket: PathBuf,
     },
     Pong {

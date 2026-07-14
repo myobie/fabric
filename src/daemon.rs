@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::{FabricHome, Peer, PeerBook, load_or_create_identity, validate_protocol},
     control::{ControlRequest, ControlResponse, PeerReachability},
+    shell,
 };
 
 const BUILTIN_ECHO_ALPN: &[u8] = b"fabric/echo/0";
@@ -64,18 +65,23 @@ pub struct DaemonState {
     exposures: RwLock<HashMap<Vec<u8>, PathBuf>>,
     dial_sockets: Mutex<HashMap<(String, String), PathBuf>>,
     builtin_echo_hits: AtomicUsize,
+    allow_shell: bool,
     cancel: CancellationToken,
 }
 
 impl DaemonState {
-    async fn new(home: FabricHome, cancel: CancellationToken) -> Result<Arc<Self>> {
+    async fn new(
+        home: FabricHome,
+        cancel: CancellationToken,
+        allow_shell: bool,
+    ) -> Result<Arc<Self>> {
         home.prepare()?;
         let secret_key = load_or_create_identity(&home)?;
         let peer_book = PeerBook::load(&home)?;
         let allowed = Arc::new(RwLock::new(peer_book.trusted_ids()));
         let endpoint = Endpoint::builder(presets::N0)
             .secret_key(secret_key)
-            .alpns(vec![BUILTIN_ECHO_ALPN.to_vec()])
+            .alpns(accepted_alpns(&HashMap::new()))
             .hooks(AllowListHook {
                 allowed: allowed.clone(),
             })
@@ -92,6 +98,7 @@ impl DaemonState {
             exposures: RwLock::new(HashMap::new()),
             dial_sockets: Mutex::new(HashMap::new()),
             builtin_echo_hits: AtomicUsize::new(0),
+            allow_shell,
             cancel,
         }))
     }
@@ -113,8 +120,8 @@ impl DaemonState {
 
     pub async fn expose(&self, protocol: &str, socket: PathBuf) -> Result<()> {
         let alpn = validate_protocol(protocol)?;
-        if alpn == BUILTIN_ECHO_ALPN {
-            bail!("{protocol:?} is reserved for fabric's built-in echo protocol");
+        if matches_reserved_alpn(&alpn) {
+            bail!("{protocol:?} is reserved for fabric's built-in protocols");
         }
         if !socket.is_absolute() {
             bail!("expose socket must be an absolute path");
@@ -170,6 +177,10 @@ impl DaemonState {
 
     pub async fn dial(&self, peer: &str, protocol: &str) -> Result<PathBuf> {
         let alpn = validate_protocol(protocol)?;
+        self.dial_alpn(peer, protocol, alpn).await
+    }
+
+    async fn dial_alpn(&self, peer: &str, protocol: &str, alpn: Vec<u8>) -> Result<PathBuf> {
         let peer_addr = self.peer_book.read().await.resolve(peer)?;
         let key = (peer_addr.id.to_string(), protocol.to_string());
 
@@ -314,8 +325,12 @@ pub struct FabricNode {
 
 impl FabricNode {
     pub async fn start(home: FabricHome) -> Result<Self> {
+        Self::start_with_options(home, false).await
+    }
+
+    pub async fn start_with_options(home: FabricHome, allow_shell: bool) -> Result<Self> {
         let cancel = CancellationToken::new();
-        let state = DaemonState::new(home, cancel).await?;
+        let state = DaemonState::new(home, cancel, allow_shell).await?;
         let task = tokio::spawn(serve(state.clone()));
         Ok(Self { state, task })
     }
@@ -354,8 +369,11 @@ impl FabricNode {
     }
 }
 
-pub async fn run_daemon(home: FabricHome) -> Result<()> {
-    FabricNode::start(home).await?.wait().await
+pub async fn run_daemon(home: FabricHome, allow_shell: bool) -> Result<()> {
+    FabricNode::start_with_options(home, allow_shell)
+        .await?
+        .wait()
+        .await
 }
 
 pub async fn send_control(home: &FabricHome, request: ControlRequest) -> Result<ControlResponse> {
@@ -464,6 +482,12 @@ async fn process_control_request(
                 transport: pong.transport,
             }
         }
+        ControlRequest::Shell { peer } => {
+            let socket = state
+                .dial_alpn(&peer, shell::SHELL_PROTOCOL, shell::SHELL_ALPN.to_vec())
+                .await?;
+            ControlResponse::Shell { socket }
+        }
         ControlRequest::Shutdown => {
             state.cancel.cancel();
             ControlResponse::Ok
@@ -501,6 +525,11 @@ async fn process_incoming_iroh(incoming: Incoming, state: Arc<DaemonState>) -> R
         handle_builtin_echo(connection, state).await?;
         return Ok(());
     }
+    if alpn == shell::SHELL_ALPN {
+        let connection = accepting.await?;
+        handle_builtin_shell(connection, state).await?;
+        return Ok(());
+    }
 
     let socket = {
         let exposures = state.exposures.read().await;
@@ -528,11 +557,28 @@ async fn handle_builtin_echo(connection: Connection, state: Arc<DaemonState>) ->
     Ok(())
 }
 
+async fn handle_builtin_shell(connection: Connection, state: Arc<DaemonState>) -> Result<()> {
+    let (mut send, mut recv) = connection.accept_bi().await?;
+    if state.allow_shell {
+        shell::serve_shell_session(&mut recv, &mut send).await?;
+    } else {
+        shell::serve_shell_disabled(&mut send).await?;
+    }
+    send.finish()?;
+    connection.closed().await;
+    Ok(())
+}
+
 fn accepted_alpns(exposures: &HashMap<Vec<u8>, PathBuf>) -> Vec<Vec<u8>> {
-    let mut alpns = Vec::with_capacity(exposures.len() + 1);
+    let mut alpns = Vec::with_capacity(exposures.len() + 2);
     alpns.push(BUILTIN_ECHO_ALPN.to_vec());
+    alpns.push(shell::SHELL_ALPN.to_vec());
     alpns.extend(exposures.keys().cloned());
     alpns
+}
+
+fn matches_reserved_alpn(alpn: &[u8]) -> bool {
+    alpn == BUILTIN_ECHO_ALPN || alpn == shell::SHELL_ALPN
 }
 
 fn classify_connection_transport(connection: &Connection) -> Option<String> {

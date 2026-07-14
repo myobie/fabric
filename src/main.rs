@@ -1,5 +1,6 @@
 use std::{
     fs::OpenOptions,
+    io::IsTerminal,
     path::PathBuf,
     process::{Command as ProcessCommand, Stdio},
     time::{Duration, Instant},
@@ -14,7 +15,9 @@ use fabric::{
     },
     control::{ControlRequest, ControlResponse, PeerReachability},
     daemon::{FabricNode, run_daemon, send_control},
+    shell::{self, ServerFrame},
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Debug, Parser)]
 #[command(name = "fabric")]
@@ -57,6 +60,9 @@ enum Commands {
         /// Run in the foreground instead of spawning a background daemon.
         #[arg(long)]
         foreground: bool,
+        /// Serve remote shells to trusted peers.
+        #[arg(long)]
+        allow_shell: bool,
     },
     /// Stop the local fabric daemon.
     Down,
@@ -70,9 +76,14 @@ enum Commands {
     Dial { peer: String, protocol: String },
     /// Round-trip a random nonce through a peer's built-in echo protocol.
     Ping { peer: String },
+    /// Open an interactive remote shell on a trusted peer.
+    Shell { peer: String },
     /// Internal foreground daemon entrypoint.
     #[command(hide = true)]
-    Daemon,
+    Daemon {
+        #[arg(long)]
+        allow_shell: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -159,14 +170,17 @@ async fn main() -> Result<()> {
                     book.save(&home)?;
                     let _ = send_control(&home, ControlRequest::ReloadPeers).await;
                 }
-                Commands::Up { foreground } => {
+                Commands::Up {
+                    foreground,
+                    allow_shell,
+                } => {
                     if foreground {
-                        let node = FabricNode::start(home).await?;
+                        let node = FabricNode::start_with_options(home, allow_shell).await?;
                         let peers = node.state().peer_reachability().await;
                         print_startup_reachability(&peers);
                         node.wait().await?;
                     } else {
-                        spawn_daemon(&home).await?;
+                        spawn_daemon(&home, allow_shell).await?;
                         print_daemon_reachability(&home).await?;
                     }
                 }
@@ -207,8 +221,16 @@ async fn main() -> Result<()> {
                         response => bail!("unexpected daemon response: {response:?}"),
                     }
                 }
-                Commands::Daemon => {
-                    run_daemon(home).await?;
+                Commands::Shell { peer } => {
+                    let socket = match send_control(&home, ControlRequest::Shell { peer }).await? {
+                        ControlResponse::Shell { socket } => socket,
+                        response => bail!("unexpected daemon response: {response:?}"),
+                    };
+                    let code = run_shell_client(&socket).await?;
+                    std::process::exit(code);
+                }
+                Commands::Daemon { allow_shell } => {
+                    run_daemon(home, allow_shell).await?;
                 }
             }
         }
@@ -293,7 +315,92 @@ fn joined_or_dash(values: &[String]) -> String {
     }
 }
 
-async fn spawn_daemon(home: &FabricHome) -> Result<()> {
+async fn run_shell_client(socket: &PathBuf) -> Result<i32> {
+    let stream = tokio::net::UnixStream::connect(socket).await?;
+    let (mut read, mut write) = stream.into_split();
+    let _raw_mode = RawModeGuard::enable_if_terminal()?;
+    let (cols, rows) = terminal_size();
+    shell::write_client_resize(&mut write, rows, cols).await?;
+
+    let stdin_task = tokio::spawn(async move {
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 8192];
+        loop {
+            let read = stdin.read(&mut buf).await?;
+            if read == 0 {
+                shell::write_client_eof(&mut write).await?;
+                return Ok::<(), anyhow::Error>(());
+            }
+            shell::write_client_stdin(&mut write, &buf[..read]).await?;
+        }
+    });
+
+    let mut stdout = tokio::io::stdout();
+    let mut stderr = tokio::io::stderr();
+    let mut exit_code = 1;
+
+    while let Some(frame) = shell::read_server_frame(&mut read).await? {
+        match frame {
+            ServerFrame::Output(bytes) => {
+                stdout.write_all(&bytes).await?;
+                stdout.flush().await?;
+            }
+            ServerFrame::Error(message) => {
+                stderr.write_all(message.as_bytes()).await?;
+                stderr.write_all(b"\n").await?;
+                stderr.flush().await?;
+            }
+            ServerFrame::Exit(code) => {
+                exit_code = normalize_exit_code(code);
+                break;
+            }
+        }
+    }
+
+    stdin_task.abort();
+    let _ = stdin_task.await;
+    stdout.flush().await?;
+    stderr.flush().await?;
+    Ok(exit_code)
+}
+
+fn terminal_size() -> (u16, u16) {
+    if std::io::stdout().is_terminal()
+        && let Ok((cols, rows)) = crossterm::terminal::size()
+    {
+        return (cols, rows);
+    }
+    (80, 24)
+}
+
+fn normalize_exit_code(code: i32) -> i32 {
+    code.clamp(0, 255)
+}
+
+struct RawModeGuard {
+    enabled: bool,
+}
+
+impl RawModeGuard {
+    fn enable_if_terminal() -> Result<Self> {
+        if std::io::stdin().is_terminal() {
+            crossterm::terminal::enable_raw_mode()?;
+            Ok(Self { enabled: true })
+        } else {
+            Ok(Self { enabled: false })
+        }
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        if self.enabled {
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+    }
+}
+
+async fn spawn_daemon(home: &FabricHome, allow_shell: bool) -> Result<()> {
     if send_control(home, ControlRequest::Status).await.is_ok() {
         println!("already running");
         return Ok(());
@@ -306,10 +413,12 @@ async fn spawn_daemon(home: &FabricHome) -> Result<()> {
         .open(home.log_path())?;
     let err = log.try_clone()?;
     let exe = std::env::current_exe()?;
-    ProcessCommand::new(exe)
-        .arg("--home")
-        .arg(home.root())
-        .arg("daemon")
+    let mut command = ProcessCommand::new(exe);
+    command.arg("--home").arg(home.root()).arg("daemon");
+    if allow_shell {
+        command.arg("--allow-shell");
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(err))

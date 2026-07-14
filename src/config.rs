@@ -1,6 +1,7 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
     env, fs,
+    hash::{Hash, Hasher},
     io::Write,
     path::{Path, PathBuf},
     str::FromStr,
@@ -91,10 +92,10 @@ impl FabricHome {
 
     pub fn dial_socket_path(&self, peer: EndpointId, protocol: &str) -> PathBuf {
         let peer = peer.to_string();
-        let short_peer = &peer[..peer.len().min(12)];
+        let short_peer = &peer[..peer.len().min(8)];
         self.root
             .join("dials")
-            .join(format!("{}-{}.sock", short_peer, safe_component(protocol)))
+            .join(format!("{}-{:08x}.sock", short_peer, short_hash(protocol)))
     }
 }
 
@@ -311,20 +312,8 @@ pub fn validate_protocol(protocol: &str) -> Result<Vec<u8>> {
     Ok(protocol.as_bytes().to_vec())
 }
 
-fn safe_component(input: &str) -> String {
-    let out: String = input
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if out.is_empty() {
-        "protocol".to_string()
-    } else {
-        out
-    }
+fn short_hash(input: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    input.hash(&mut hasher);
+    hasher.finish()
 }

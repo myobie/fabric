@@ -134,13 +134,16 @@ fabric remove <nodeid-or-name>
 Remove a trusted peer.
 
 ```sh
-fabric up [--foreground]
+fabric up [--foreground] [--allow-shell]
 ```
 
 Start the local fabric daemon. Without `--foreground`, this spawns a background
 daemon and logs to `<home>/logs/daemon.log`. After the daemon is ready, `fabric
 up` runs the same echo-ping reachability check used by `fabric status` and
 prints one line per trusted peer.
+
+`--allow-shell` opts this daemon into serving remote shells for trusted peers.
+It is off by default.
 
 ```sh
 fabric down
@@ -178,6 +181,20 @@ ACL-gated echo protocol, sends a random nonce, verifies the same bytes come
 back, and prints the round-trip latency. When available, it also reports whether
 iroh used a direct, relay, or mixed path. Use this first when bringing up a new
 machine.
+
+```sh
+fabric shell <peer>
+```
+
+Open an interactive remote shell on a trusted peer over fabric. The server side
+must have been started with `fabric up --allow-shell`; a default `fabric up`
+refuses shell requests. The shell runs as the remote daemon's user and uses the
+remote user's `$SHELL`.
+
+Enabling shell is a security-sensitive opt-in: every trusted peer in
+`peers.toml` can obtain a remote shell while `--allow-shell` is active. Keep the
+allow-list tight, enable shell only on machines where that access is intended,
+and stop/restart the daemon without `--allow-shell` to turn it back off.
 
 ## Declarative Peer Config
 
