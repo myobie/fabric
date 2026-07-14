@@ -29,7 +29,8 @@ curl -sSf https://raw.githubusercontent.com/myobie/fabric/main/install.sh | sh
 The remote installer downloads a matching prebuilt release binary into
 `~/.local/bin/fabric` when one exists. If no prebuilt binary matches your
 machine, it falls back to cloning this repo and building with Cargo. Ensure
-`~/.local/bin` is on PATH.
+`~/.local/bin` is on PATH. To install somewhere else, set `FABRIC_BIN_DIR` or
+`BIN_DIR`.
 
 From a cloned repo:
 

@@ -3,17 +3,37 @@ set -eu
 
 REPO="myobie/fabric"
 REPO_URL="https://github.com/$REPO"
-INSTALL_DIR="${FABRIC_INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_DIR="${FABRIC_BIN_DIR:-${BIN_DIR:-${FABRIC_INSTALL_DIR:-$HOME/.local/bin}}}"
 
 echo "fabric: experimental prototype installer"
 
 install_binary() {
   src="$1"
+  target="$INSTALL_DIR/fabric"
   mkdir -p "$INSTALL_DIR"
-  cp "$src" "$INSTALL_DIR/fabric"
-  chmod 755 "$INSTALL_DIR/fabric"
-  echo "installed: $INSTALL_DIR/fabric"
+
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    if ! "$target" --help 2>/dev/null | grep -q "Local socket facade for iroh-backed cross-machine transports"; then
+      echo "error: refusing to overwrite non-fabric file at $target" >&2
+      exit 1
+    fi
+    rm -f "$target"
+  fi
+
+  cp "$src" "$target"
+  chmod 755 "$target"
+  echo "installed: $target"
   echo "ensure $INSTALL_DIR is on PATH"
+
+  if found=$(command -v fabric 2>/dev/null); then
+    if [ "$found" = "$target" ]; then
+      echo "fabric on PATH at $found"
+    else
+      echo "fabric is on PATH at $found (installed this copy at $target)"
+    fi
+  else
+    echo "fabric is not currently on PATH; add $INSTALL_DIR to PATH"
+  fi
 }
 
 require_cargo() {
