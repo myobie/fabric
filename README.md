@@ -27,10 +27,22 @@ curl -sSf https://raw.githubusercontent.com/myobie/fabric/main/install.sh | sh
 ```
 
 The remote installer downloads a matching prebuilt release binary into
-`~/.local/bin/fabric` when one exists. If no prebuilt binary matches your
-machine, it falls back to cloning this repo and building with Cargo. Ensure
-`~/.local/bin` is on PATH. To install somewhere else, set `FABRIC_BIN_DIR` or
-`BIN_DIR`.
+`~/.local/bin/fabric`, prints the installed version, and fails if that version
+does not match the targeted release. Ensure `~/.local/bin` is on PATH. To
+install somewhere else, set `FABRIC_BIN_DIR` or `BIN_DIR`.
+
+The remote installer does not silently fall back to source builds. If no
+prebuilt binary matches your machine, run an explicit source install:
+
+```sh
+curl -sSf https://raw.githubusercontent.com/myobie/fabric/main/install.sh | sh -s -- --from-source
+```
+
+To pin a release:
+
+```sh
+curl -sSf https://raw.githubusercontent.com/myobie/fabric/main/install.sh | sh -s -- --version v0.1.7
+```
 
 From a cloned repo:
 
@@ -45,7 +57,8 @@ make install
 ```
 
 The cloned-repo installer builds the current checkout and copies the release
-binary to `~/.local/bin/fabric`.
+binary to `~/.local/bin/fabric`. It prints the actual installed version; this
+path is intentionally for local checkout installs, not remote release installs.
 
 Rust users can also install through Cargo:
 
