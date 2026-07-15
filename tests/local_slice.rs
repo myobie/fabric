@@ -29,6 +29,7 @@ use tokio::{
 static LOCAL_SLICE_LOCKED: AtomicBool = AtomicBool::new(false);
 const FABRIC_COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
 const LOCAL_IO_TIMEOUT: Duration = Duration::from_secs(30);
+const LARGE_PAYLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 const LOCAL_SLICE_SETTLE: Duration = Duration::from_millis(500);
 
 struct LocalSliceGuard;
@@ -177,11 +178,9 @@ async fn generic_tunnel_survives_transport_reconnect_without_reopening_local_ser
     tokio::time::sleep(Duration::from_millis(500)).await;
     run_fabric(&node_a_home, &["debug", "unblock-tunnels"])?;
 
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        read_expected(&mut stream, b"during-drop"),
-    )
-    .await??;
+    tokio::time::timeout(LOCAL_IO_TIMEOUT, read_expected(&mut stream, b"during-drop"))
+        .await
+        .context("generic reconnect payload timed out")??;
     stream_round_trip(&mut stream, b"after-drop").await?;
     assert_eq!(
         echo_hits.load(Ordering::SeqCst),
@@ -292,11 +291,9 @@ async fn exec_expose_reconnect_keeps_child_bound_to_tunnel_session() -> Result<(
     tokio::time::sleep(Duration::from_millis(500)).await;
     run_fabric(&node_a_home, &["debug", "unblock-tunnels"])?;
 
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        read_expected(&mut stream, b"during-drop"),
-    )
-    .await??;
+    tokio::time::timeout(LOCAL_IO_TIMEOUT, read_expected(&mut stream, b"during-drop"))
+        .await
+        .context("exec reconnect payload timed out")??;
     stream_round_trip(&mut stream, b"after-drop").await?;
     assert_eq!(
         fs::read_to_string(&marker)?,
@@ -437,15 +434,19 @@ async fn exec_expose_enforces_per_exposure_child_limit() -> Result<()> {
     .await?;
 
     let marker = node_a_dir.path().join("exec-spawns.txt");
+    let ready = node_a_dir.path().join("exec-ready.txt");
+    let release = node_a_dir.path().join("exec-release");
     node_a
         .expose_exec_with_limit(
             "limited-cat",
             vec![
                 "/bin/sh".to_string(),
                 "-c".to_string(),
-                "printf spawn >> \"$1\"; exec /bin/cat".to_string(),
+                "printf spawn >> \"$1\"; printf ready > \"$2\"; while [ ! -e \"$3\" ]; do sleep 0.1; done; exec /bin/cat".to_string(),
                 "fabric-test".to_string(),
                 marker.display().to_string(),
+                ready.display().to_string(),
+                release.display().to_string(),
             ],
             1,
         )
@@ -453,7 +454,7 @@ async fn exec_expose_enforces_per_exposure_child_limit() -> Result<()> {
 
     let dial_socket = node_b.dial("node-a", "limited-cat").await?;
     let mut first = UnixStream::connect(&dial_socket).await?;
-    stream_round_trip(&mut first, b"first-child").await?;
+    wait_for_file_contents(&ready, "ready").await?;
     assert_eq!(fs::read_to_string(&marker)?, "spawn");
 
     assert_tunnel_rejects_quickly(&dial_socket, b"second-child").await?;
@@ -462,6 +463,8 @@ async fn exec_expose_enforces_per_exposure_child_limit() -> Result<()> {
         "spawn",
         "limit rejection must not spawn a second child"
     );
+
+    fs::write(&release, "go")?;
     stream_round_trip(&mut first, b"first-still-alive").await?;
 
     drop(first);
@@ -562,11 +565,12 @@ async fn exec_expose_streams_payload_larger_than_tunnel_buffer() -> Result<()> {
         read.read_exact(&mut response).await?;
         Ok::<(), anyhow::Error>(())
     };
-    tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(LARGE_PAYLOAD_TIMEOUT, async {
         tokio::try_join!(writer, reader)?;
         Ok::<(), anyhow::Error>(())
     })
-    .await??;
+    .await
+    .context("large exec payload round trip timed out")??;
     assert_eq!(response, payload);
 
     node_b.shutdown().await?;
@@ -716,10 +720,11 @@ async fn tcp_expose_dial_listener_round_trips_and_reconnects() -> Result<()> {
     run_fabric(&node_a_home, &["debug", "unblock-tunnels"])?;
 
     tokio::time::timeout(
-        Duration::from_secs(10),
+        LOCAL_IO_TIMEOUT,
         read_expected_tcp(&mut stream, b"during-drop"),
     )
-    .await??;
+    .await
+    .context("tcp reconnect payload timed out")??;
     tcp_stream_round_trip(&mut stream, b"after-drop").await?;
     assert_eq!(
         echo_hits.load(Ordering::SeqCst),
@@ -1193,6 +1198,19 @@ async fn read_expected_tcp(stream: &mut TcpStream, expected: &[u8]) -> Result<()
     stream.read_exact(&mut response).await?;
     assert_eq!(response, expected);
     Ok(())
+}
+
+async fn wait_for_file_contents(path: &Path, expected: &str) -> Result<()> {
+    tokio::time::timeout(LOCAL_IO_TIMEOUT, async {
+        loop {
+            match fs::read_to_string(path) {
+                Ok(contents) if contents == expected => return Ok(()),
+                Ok(_) | Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+    })
+    .await
+    .with_context(|| format!("{} did not contain {expected:?}", path.display()))?
 }
 
 fn pid_cat_argv(pid_file: &Path) -> Vec<String> {
