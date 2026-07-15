@@ -212,6 +212,16 @@ journalctl --user -u fabric.service --no-pager -n 100
 ~/.local/bin/fabric status
 ```
 
+The `fabric status` output must include:
+
+```text
+shell	allowed
+```
+
+This is a lockout check, not cosmetic output. If shell shows `disabled`, the
+daemon is alive but remote shell recovery is broken; fix the unit command or
+the future shell policy config before declaring the deploy healthy.
+
 7. Restart pty remote-serve and verify locally:
 
 ```sh
@@ -262,6 +272,7 @@ systemctl --user restart pty-remote-serve.service
 - `systemctl --user is-enabled fabric.service` prints `enabled`.
 - `systemctl --user is-active fabric.service` prints `active`.
 - `fabric status` works locally on Hetzner after a service restart.
+- `fabric status` prints `shell	allowed` after a service restart.
 - `fabric ping hetzner` works from the Mac after a service restart.
 - Killing the fabric process causes systemd to restart it:
 
