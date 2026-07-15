@@ -230,6 +230,37 @@ allow-list tight, enable shell only on machines where that access is intended,
 and use `fabric restart --no-allow-shell` to turn it back off without risking a
 remote lockout.
 
+### Debug Transport Test Commands
+
+These commands are hidden from normal help output and exist to validate the
+resumable transport in live deployments.
+
+```sh
+fabric debug echo --socket /tmp/fabric-wan-echo.sock
+```
+
+Run a foreground Unix-socket echo service. Use this as the service behind a
+generic `fabric expose` when the remote machine does not have `socat` or another
+Unix-socket echo tool installed.
+
+```sh
+fabric debug unix-cat --socket <local-dial-sock>
+```
+
+Connect stdin/stdout to a Unix socket and keep that one local socket open. This
+is useful for proving bytes resume over the same local connection after an iroh
+attach drop.
+
+```sh
+fabric debug block-tunnels
+fabric debug drop-tunnels
+fabric debug unblock-tunnels
+```
+
+Reject new generic tunnel attaches, close active generic tunnel attaches, and
+then allow attaches again. This is intentionally non-destructive: it does not
+stop the daemon, and it does not affect the built-in `fabric shell` ALPN.
+
 ## Declarative Peer Config
 
 `peers.toml` is intentionally human-editable. The minimal form is:
@@ -324,6 +355,51 @@ target/debug/fabric --home "$FABRIC_B" dial node-a pty-view
 
 The printed socket on node B is the local pipe a consumer connects to.
 
+## Live WAN Reconnect Test
+
+Use this procedure to validate Layer 1 over a real Mac-to-Hetzner link without
+restarting either daemon. Restarting the accept-side daemon is intentionally not
+part of this test because it would lose the server-side in-memory tunnel session.
+
+On Hetzner, start a generic Unix echo service in one shell:
+
+```sh
+fabric debug echo --socket /tmp/fabric-wan-echo.sock
+```
+
+In another Hetzner shell, expose it:
+
+```sh
+fabric expose wan-echo --socket /tmp/fabric-wan-echo.sock
+```
+
+On the Mac, dial the service and connect one long-lived local socket:
+
+```sh
+SOCK=$(fabric dial hetzner wan-echo)
+fabric debug unix-cat --socket "$SOCK"
+```
+
+Type `before` and press Enter; it should echo immediately. Then, from Hetzner,
+force a clean generic-tunnel drop and temporarily reject reconnects:
+
+```sh
+fabric debug block-tunnels
+fabric debug drop-tunnels
+```
+
+Back in the Mac `unix-cat` process, type `during-drop` and press Enter. It should
+not echo while blocked, but the process and local socket should stay open. Then
+unblock Hetzner:
+
+```sh
+fabric debug unblock-tunnels
+```
+
+The `during-drop` bytes should arrive on the Mac over the same `unix-cat`
+process. Type `after` and press Enter to confirm the reattached tunnel continues
+to carry new bytes.
+
 ## Consumer Contract
 
 A consumer such as `pty` should treat fabric as a local socket provider:
@@ -348,6 +424,9 @@ through an `EndpointHooks::after_handshake` allow-list check before the daemon
 connects to any exposed local service.
 
 `fabric dial` registers a local Unix listener under `<home>/dials`. Each local
-connection opens one iroh bidirectional stream to the peer and copies bytes in
-both directions. This keeps iroh isolated inside fabric while preserving the
-ordinary Unix-socket interface expected by local tools.
+connection gets a random tunnel session id bound to the remote peer id. Generic
+dials use a small framed byte protocol with offsets and ACKs, so unacked bytes
+can be replayed after a real iroh attach loss while the local Unix socket stays
+open. Built-in `fabric shell` remains on its raw one-shot stream protocol; a
+resilient shell should be built above generic fabric transport, for example by
+running a long-lived `pty` session over `fabric dial`.

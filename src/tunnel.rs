@@ -668,7 +668,9 @@ pub async fn serve_connection(
 
 fn is_expected_detach(error: &anyhow::Error) -> bool {
     let error = format!("{error:#}");
-    error.contains("connection lost: closed") || error.contains("tunnel attach stream closed")
+    error.contains("connection lost: closed")
+        || error.contains("tunnel attach stream closed")
+        || error.contains("closed: closed")
 }
 
 async fn get_or_create_server_session(

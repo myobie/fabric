@@ -1,5 +1,5 @@
 use std::{
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
     io::IsTerminal,
     path::PathBuf,
     process::{Command as ProcessCommand, Stdio},
@@ -90,6 +90,12 @@ enum Commands {
     Ping { peer: String },
     /// Open an interactive remote shell on a trusted peer.
     Shell { peer: String },
+    /// Internal/debug commands for transport testing.
+    #[command(hide = true)]
+    Debug {
+        #[command(subcommand)]
+        command: DebugCommands,
+    },
     /// Internal foreground daemon entrypoint.
     #[command(hide = true)]
     Daemon {
@@ -117,6 +123,26 @@ enum KeyCommands {
         /// Path to write the identity file.
         #[arg(long)]
         out: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DebugCommands {
+    /// Close active generic tunnel iroh attaches without stopping the daemon.
+    DropTunnels,
+    /// Reject new generic tunnel attaches until unblocked.
+    BlockTunnels,
+    /// Allow new generic tunnel attaches again.
+    UnblockTunnels,
+    /// Run a foreground Unix-socket echo service.
+    Echo {
+        #[arg(long)]
+        socket: PathBuf,
+    },
+    /// Connect stdin/stdout to a Unix socket.
+    UnixCat {
+        #[arg(long)]
+        socket: PathBuf,
     },
 }
 
@@ -281,6 +307,28 @@ async fn main() -> Result<()> {
                     let code = run_shell_client(&socket).await?;
                     std::process::exit(code);
                 }
+                Commands::Debug { command } => match command {
+                    DebugCommands::DropTunnels => {
+                        send_control(&home, ControlRequest::DropTunnelConnections).await?;
+                        println!("dropped tunnel connections");
+                    }
+                    DebugCommands::BlockTunnels => {
+                        send_control(&home, ControlRequest::SetTunnelBlocked { blocked: true })
+                            .await?;
+                        println!("blocked tunnel attaches");
+                    }
+                    DebugCommands::UnblockTunnels => {
+                        send_control(&home, ControlRequest::SetTunnelBlocked { blocked: false })
+                            .await?;
+                        println!("unblocked tunnel attaches");
+                    }
+                    DebugCommands::Echo { socket } => {
+                        run_debug_echo(socket).await?;
+                    }
+                    DebugCommands::UnixCat { socket } => {
+                        run_debug_unix_cat(socket).await?;
+                    }
+                },
                 Commands::Daemon { allow_shell } => {
                     run_daemon(home, allow_shell).await?;
                 }
@@ -537,6 +585,55 @@ async fn run_shell_client(socket: &PathBuf) -> Result<i32> {
     Ok(exit_code)
 }
 
+async fn run_debug_echo(socket: PathBuf) -> Result<()> {
+    if socket.exists() {
+        fs::remove_file(&socket)?;
+    }
+    let listener = tokio::net::UnixListener::bind(&socket)?;
+    let _cleanup = SocketFileGuard(socket.clone());
+    println!("echo listening\t{}", socket.display());
+
+    loop {
+        tokio::select! {
+            result = listener.accept() => {
+                let (stream, _) = result?;
+                tokio::spawn(async move {
+                    let (mut read, mut write) = stream.into_split();
+                    if let Err(error) = tokio::io::copy(&mut read, &mut write).await {
+                        eprintln!("fabric debug echo: connection failed: {error}");
+                    }
+                });
+            }
+            result = tokio::signal::ctrl_c() => {
+                result?;
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_debug_unix_cat(socket: PathBuf) -> Result<()> {
+    let stream = tokio::net::UnixStream::connect(&socket).await?;
+    let (mut read, mut write) = stream.into_split();
+
+    let to_socket = async {
+        let mut stdin = tokio::io::stdin();
+        tokio::io::copy(&mut stdin, &mut write).await?;
+        write.shutdown().await?;
+        Ok::<(), anyhow::Error>(())
+    };
+    let to_stdout = async {
+        let mut stdout = tokio::io::stdout();
+        tokio::io::copy(&mut read, &mut stdout).await?;
+        stdout.flush().await?;
+        Ok::<(), anyhow::Error>(())
+    };
+    tokio::try_join!(to_socket, to_stdout)?;
+    Ok(())
+}
+
 fn terminal_size() -> (u16, u16) {
     if std::io::stdout().is_terminal()
         && let Ok((cols, rows)) = crossterm::terminal::size()
@@ -552,6 +649,14 @@ fn normalize_exit_code(code: i32) -> i32 {
 
 struct RawModeGuard {
     enabled: bool,
+}
+
+struct SocketFileGuard(PathBuf);
+
+impl Drop for SocketFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 impl RawModeGuard {
