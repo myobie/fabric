@@ -361,8 +361,8 @@ Use this procedure to validate Layer 1 over a real Mac-to-Hetzner link without
 restarting either daemon. Restarting the accept-side daemon is intentionally not
 part of this test because it would lose the server-side in-memory tunnel session.
 
-The standalone systemd-per-daemon Hetzner plan is parked; convoy is the chosen
-supervisor. For the retained daemon run surfaces, see
+The Hetzner supervisor model is undecided and the standalone systemd-per-daemon
+plan is parked. For the retained daemon run surfaces, see
 [docs/hetzner-supervisor-plan.md](docs/hetzner-supervisor-plan.md).
 
 On Hetzner, start a generic Unix echo service in one shell:

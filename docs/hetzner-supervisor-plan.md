@@ -1,23 +1,30 @@
 # Hetzner Supervisor Plan
 
-Status: parked. Do not deploy the standalone systemd-per-daemon units in this
-document.
+Status: parked. The Hetzner supervision model is undecided. Do not deploy the
+standalone systemd-per-daemon units or a convoy-owned replacement from this
+document until Nathan makes the architecture call.
 
-Nathan chose convoy as the single supervisor. The deployed target is:
+The open architecture question is whether Hetzner should be supervised as:
 
 ```text
 systemd -> convoy up -> fabric + pty remote-serve + st-sync + agents
 ```
 
-Systemd may still own `convoy up`, but it should not independently own
-`fabric.service`, `pty-remote-serve.service`, or the fabric exposure unit unless
-Nathan changes that direction. This document is retained as a run-surface and
-diagnostic reference for convoy-owned supervision.
+or as standalone systemd-owned daemon units such as:
+
+```text
+systemd -> fabric
+systemd -> pty remote-serve
+systemd -> fabric pty-view exposure
+```
+
+This document is retained as a run-surface and diagnostic reference while that
+choice is pending.
 
 ## Run Surfaces For Convoy
 
-Convoy owns lifecycle, restart policy, logging policy, and deploy orchestration.
-These are the process commands and readiness checks convoy needs to preserve.
+These are the process commands and readiness checks any supervisor model needs
+to preserve.
 
 ### Fabric
 
@@ -81,8 +88,8 @@ The status output must include `pty-view` in `exposed`.
 ## Historical Standalone Systemd Draft
 
 The remaining sections are the pre-decision standalone systemd draft. They are
-useful for command surfaces and acceptance checks, but convoy-claude owns the
-active supervisor design now.
+useful for command surfaces and acceptance checks, but they are not active
+deploy instructions until Nathan chooses the supervisor model.
 
 ## Goals
 
