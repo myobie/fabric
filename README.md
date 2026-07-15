@@ -361,6 +361,9 @@ Use this procedure to validate Layer 1 over a real Mac-to-Hetzner link without
 restarting either daemon. Restarting the accept-side daemon is intentionally not
 part of this test because it would lose the server-side in-memory tunnel session.
 
+For the durable Hetzner process-owner plan, see
+[docs/hetzner-supervisor-plan.md](docs/hetzner-supervisor-plan.md).
+
 On Hetzner, start a generic Unix echo service in one shell:
 
 ```sh
