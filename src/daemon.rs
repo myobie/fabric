@@ -1115,9 +1115,10 @@ impl DaemonState {
                 context,
                 generation = endpoint.generation,
                 online = true,
+                peer_probe_attempted = false,
                 peer_reachable = false,
                 recovered = true,
-                "endpoint health recovered via online status"
+                "endpoint online; peer echo probe skipped"
             );
             eprintln!(
                 "fabric: iroh endpoint generation {} is online during {context}",
@@ -1133,6 +1134,7 @@ impl DaemonState {
                 context,
                 generation = endpoint.generation,
                 stale_generation = true,
+                peer_probe_attempted = false,
                 "endpoint generation changed while health check was running"
             );
             return true;
@@ -1150,6 +1152,7 @@ impl DaemonState {
             context,
             generation = endpoint.generation,
             online = false,
+            peer_probe_attempted = true,
             peer_reachable,
             recovered = peer_reachable,
             "endpoint health checked trusted peer echo"
