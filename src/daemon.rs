@@ -61,6 +61,9 @@ const ENDPOINT_DIAGNOSTIC_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
 const ENDPOINT_RECYCLE_MIN_INTERVAL: Duration = Duration::from_secs(60);
 const ENDPOINT_RSS_RECYCLE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const ENDPOINT_RSS_RECYCLE_THRESHOLD_BYTES: u64 = 300 * 1024 * 1024;
+const ENDPOINT_RSS_RECYCLE_SETTLE_INTERVAL: Duration = Duration::from_secs(5);
+const ENDPOINT_RSS_INEFFECTIVE_INITIAL_BACKOFF: Duration = Duration::from_secs(5 * 60);
+const ENDPOINT_RSS_INEFFECTIVE_MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
 const NETWORK_CHANGE_DEBOUNCE: Duration = Duration::from_millis(140);
 const VALIDATION_LOG_TARGET: &str = "fabric::validation";
 
@@ -1694,6 +1697,9 @@ async fn run_endpoint_rss_recycle_loop(state: Arc<DaemonState>) -> Result<()> {
         state,
         ENDPOINT_RSS_RECYCLE_POLL_INTERVAL,
         ENDPOINT_RSS_RECYCLE_THRESHOLD_BYTES,
+        ENDPOINT_RSS_RECYCLE_SETTLE_INTERVAL,
+        ENDPOINT_RSS_INEFFECTIVE_INITIAL_BACKOFF,
+        ENDPOINT_RSS_INEFFECTIVE_MAX_BACKOFF,
         Arc::new(current_rss_bytes),
     )
     .await
@@ -1703,12 +1709,16 @@ async fn run_endpoint_rss_recycle_loop_with_sampler(
     state: Arc<DaemonState>,
     poll_interval: Duration,
     threshold_bytes: u64,
+    settle_interval: Duration,
+    ineffective_initial_backoff: Duration,
+    ineffective_max_backoff: Duration,
     sample_rss: RssSampler,
 ) -> Result<()> {
     let mut interval = tokio::time::interval(poll_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     interval.tick().await;
     let mut next_recycle_attempt = Instant::now();
+    let mut ineffective_recycles = 0usize;
 
     loop {
         tokio::select! {
@@ -1728,6 +1738,7 @@ async fn run_endpoint_rss_recycle_loop_with_sampler(
 
                 if !rss_exceeds_recycle_threshold(Some(rss_bytes), threshold_bytes) {
                     next_recycle_attempt = Instant::now();
+                    ineffective_recycles = 0;
                     continue;
                 }
 
@@ -1738,6 +1749,7 @@ async fn run_endpoint_rss_recycle_loop_with_sampler(
                         event = "endpoint_rss_recycle_deferred",
                         rss_bytes,
                         threshold_bytes,
+                        ineffective_recycles,
                         retry_after_ms = next_recycle_attempt.saturating_duration_since(now).as_millis() as u64,
                         "endpoint RSS remains over threshold; waiting before next recycle attempt"
                     );
@@ -1766,7 +1778,43 @@ async fn run_endpoint_rss_recycle_loop_with_sampler(
                     .await
                 {
                     Ok(EndpointRecycleOutcome::Recycled) => {
-                        next_recycle_attempt = Instant::now() + ENDPOINT_RECYCLE_MIN_INTERVAL;
+                        let settled_rss = tokio::select! {
+                            _ = state.cancel.cancelled() => break,
+                            _ = tokio::time::sleep(settle_interval) => sample_rss(),
+                        };
+
+                        if rss_exceeds_recycle_threshold(settled_rss, threshold_bytes) {
+                            ineffective_recycles = ineffective_recycles.saturating_add(1);
+                            let backoff = endpoint_rss_ineffective_backoff(
+                                ineffective_recycles,
+                                ineffective_initial_backoff,
+                                ineffective_max_backoff,
+                            );
+                            warn!(
+                                target: VALIDATION_LOG_TARGET,
+                                event = "rss_recycle_ineffective",
+                                old_generation = endpoint.generation,
+                                current_generation = state.endpoint_handle().generation,
+                                rss_before_bytes = rss_bytes,
+                                rss_after_settle_known = settled_rss.is_some(),
+                                rss_after_settle_bytes = settled_rss.unwrap_or(0),
+                                threshold_bytes,
+                                settle_ms = settle_interval.as_millis() as u64,
+                                ineffective_recycles,
+                                backoff_ms = backoff.as_millis() as u64,
+                                "RSS-triggered endpoint recycle did not reduce RSS below threshold; backing off"
+                            );
+                            eprintln!(
+                                "fabric: RSS stayed over {} MiB after endpoint recycle ({} MiB); backing off RSS recycles for {}s",
+                                bytes_to_mib(threshold_bytes),
+                                bytes_to_mib(settled_rss.unwrap_or(0)),
+                                backoff.as_secs(),
+                            );
+                            next_recycle_attempt = Instant::now() + backoff;
+                        } else {
+                            ineffective_recycles = 0;
+                            next_recycle_attempt = Instant::now() + ENDPOINT_RECYCLE_MIN_INTERVAL;
+                        }
                     }
                     Ok(EndpointRecycleOutcome::RateLimited { retry_after }) => {
                         next_recycle_attempt = Instant::now() + retry_after;
@@ -2081,6 +2129,20 @@ fn rss_exceeds_recycle_threshold(rss_bytes: Option<u64>, threshold_bytes: u64) -
 
 fn bytes_to_mib(bytes: u64) -> u64 {
     bytes / (1024 * 1024)
+}
+
+fn endpoint_rss_ineffective_backoff(
+    ineffective_recycles: usize,
+    initial_backoff: Duration,
+    max_backoff: Duration,
+) -> Duration {
+    if ineffective_recycles == 0 {
+        return Duration::ZERO;
+    }
+    let exponent = ineffective_recycles.saturating_sub(1).min(8) as u32;
+    initial_backoff
+        .saturating_mul(1u32 << exponent)
+        .min(max_backoff)
 }
 
 #[cfg(target_os = "linux")]
@@ -2549,6 +2611,33 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn ineffective_rss_recycle_backoff_scales_and_caps() {
+        let initial = Duration::from_secs(5 * 60);
+        let max = Duration::from_secs(15 * 60);
+
+        assert_eq!(
+            endpoint_rss_ineffective_backoff(0, initial, max),
+            Duration::ZERO
+        );
+        assert_eq!(
+            endpoint_rss_ineffective_backoff(1, initial, max),
+            Duration::from_secs(5 * 60)
+        );
+        assert_eq!(
+            endpoint_rss_ineffective_backoff(2, initial, max),
+            Duration::from_secs(10 * 60)
+        );
+        assert_eq!(
+            endpoint_rss_ineffective_backoff(3, initial, max),
+            Duration::from_secs(15 * 60)
+        );
+        assert_eq!(
+            endpoint_rss_ineffective_backoff(12, initial, max),
+            Duration::from_secs(15 * 60)
+        );
+    }
+
     #[tokio::test]
     async fn rss_recycle_threshold_recycles_even_when_endpoint_online() -> Result<()> {
         let temp = tempfile::tempdir()?;
@@ -2561,6 +2650,9 @@ mod tests {
             state.clone(),
             Duration::from_millis(10),
             ENDPOINT_RSS_RECYCLE_THRESHOLD_BYTES,
+            Duration::ZERO,
+            Duration::from_secs(60),
+            Duration::from_secs(60),
             Arc::new(|| Some(ENDPOINT_RSS_RECYCLE_THRESHOLD_BYTES)),
         ));
 
