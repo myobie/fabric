@@ -332,6 +332,12 @@ enum EndpointRecycleOutcome {
 
 type RssSampler = Arc<dyn Fn() -> Option<u64> + Send + Sync>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AllocatorTrimResult {
+    attempted: bool,
+    succeeded: bool,
+}
+
 fn resolve_server_session_settings(
     config: &FabricConfig,
     options: DaemonOptions,
@@ -1340,8 +1346,12 @@ impl DaemonState {
         *self.last_endpoint_recycle.lock().await = Some(Instant::now());
         self.drop_tunnel_connections();
         old.endpoint.close().await;
+        let rss_after_close_bytes = current_rss_bytes();
+        let trim_started = Instant::now();
+        let allocator_trim = trim_process_allocator();
+        let trim_duration = trim_started.elapsed();
+        let rss_after_trim_bytes = current_rss_bytes();
         let duration = started.elapsed();
-        let rss_after_bytes = current_rss_bytes();
         info!(
             target: VALIDATION_LOG_TARGET,
             event = "endpoint_recycle",
@@ -1351,8 +1361,15 @@ impl DaemonState {
             duration_ms = duration.as_millis() as u64,
             rss_before_known = rss_before_bytes.is_some(),
             rss_before_bytes = rss_before_bytes.unwrap_or(0),
-            rss_after_known = rss_after_bytes.is_some(),
-            rss_after_bytes = rss_after_bytes.unwrap_or(0),
+            rss_after_close_known = rss_after_close_bytes.is_some(),
+            rss_after_close_bytes = rss_after_close_bytes.unwrap_or(0),
+            allocator_trim_attempted = allocator_trim.attempted,
+            allocator_trim_succeeded = allocator_trim.succeeded,
+            allocator_trim_duration_ms = trim_duration.as_millis() as u64,
+            rss_after_trim_known = rss_after_trim_bytes.is_some(),
+            rss_after_trim_bytes = rss_after_trim_bytes.unwrap_or(0),
+            rss_after_known = rss_after_trim_bytes.is_some(),
+            rss_after_bytes = rss_after_trim_bytes.unwrap_or(0),
             "recycled iroh endpoint"
         );
         eprintln!(
@@ -2169,6 +2186,23 @@ fn matches_reserved_alpn(alpn: &[u8]) -> bool {
 
 fn current_rss_bytes() -> Option<u64> {
     current_rss_bytes_impl()
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim_process_allocator() -> AllocatorTrimResult {
+    let succeeded = unsafe { libc::malloc_trim(0) != 0 };
+    AllocatorTrimResult {
+        attempted: true,
+        succeeded,
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn trim_process_allocator() -> AllocatorTrimResult {
+    AllocatorTrimResult {
+        attempted: false,
+        succeeded: false,
+    }
 }
 
 fn rss_exceeds_recycle_threshold(rss_bytes: Option<u64>, threshold_bytes: u64) -> bool {
