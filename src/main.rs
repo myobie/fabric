@@ -14,7 +14,9 @@ use fabric::{
         load_or_create_identity, parse_addr_json, parse_node_id,
     },
     control::{ControlRequest, ControlResponse, PeerReachability},
-    daemon::{DaemonOptions, FabricNode, run_daemon_with_options, send_control},
+    daemon::{
+        DaemonOptions, FabricNode, init_daemon_tracing, run_daemon_with_options, send_control,
+    },
     shell::{self, ServerFrame},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -298,6 +300,7 @@ async fn main() -> Result<()> {
                         server_session_detached_ttl_secs,
                     );
                     if foreground {
+                        init_daemon_tracing(&home)?;
                         let node = FabricNode::start_with_daemon_options(home, options).await?;
                         let peers = node.state().peer_reachability().await;
                         print_startup_reachability(&peers);
