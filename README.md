@@ -434,6 +434,57 @@ Reject new generic tunnel attaches, close active generic tunnel attaches, and
 then allow attaches again. This is intentionally non-destructive: it does not
 stop the daemon, and it does not affect the built-in `fabric shell` ALPN.
 
+## File Sync
+
+`fabric sync` keeps a folder converged with trusted peers. A declarative config
+file lists sync *entries*; the running daemon watches each folder and syncs
+changes to peers near-instantly over fabric's own transport. A tool or a human
+just adds an entry and drops files in the folder.
+
+Entries live in an authoritative, hand-editable `syncs.toml` next to `peers.toml`
+(`~/.config/fabric/syncs.toml` for the default home, `<home>/syncs.toml` with
+`--home` or `FABRIC_HOME`):
+
+```toml
+[[sync]]
+name   = "catalog"                # shared logical key: the SAME name on every machine
+folder = "/abs/path/to/catalog"   # machine-local; may differ per machine
+peers  = "*"                      # "*" = every peer in peers.toml, or ["workstation", "server"]
+policy = "catalog"                # catalog | bus
+# include = ["*.toml"]            # optional: only matching files sync (default: all)
+```
+
+Two machines are the *same* sync when they use the same `name`; their local
+`folder` paths may differ. `peers = "*"` follows the `peers.toml` allow-list, so
+sync only ever touches already-trusted peers — it adds no new trust surface.
+
+### Policies
+
+- `catalog` — union, newer-wins, and **never deletes on a peer**: a file present
+  on any peer is present on all peers, and a local deletion is restored.
+  Decommission a file by editing it (for example `retired = true`), never by
+  deleting it. Safe for a job catalog.
+- `bus` — union, newer-wins, and propagates deletes via tombstones. (Tombstone
+  sweeping is not yet implemented.)
+
+Conflicts resolve newer-wins by a logical version with a deterministic tie-break,
+not by filesystem mtime (which is unreliable across machines).
+
+### Sync Commands
+
+```sh
+fabric sync add <folder> --name <name> [--peers "*"|a,b] [--policy catalog|bus] [--include "*.toml"]
+fabric sync ls
+fabric sync rm <name-or-folder>
+fabric sync reload
+```
+
+`fabric sync add` is a convenience writer for `syncs.toml`; the file can also be
+hand-edited or provisioned before the daemon runs. `fabric sync reload` applies
+the file to a running daemon, mirroring `reload-peers`. The daemon serves and
+dials sync over the reserved `fabric/sync/1` ALPN, gated by the same peer
+allow-list as every other fabric protocol.
+
 ## Declarative Peer Config
 
 `peers.toml` is Fabric's authorized-keys file. It is intentionally

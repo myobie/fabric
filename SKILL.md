@@ -1,6 +1,6 @@
 ---
 name: fabric
-description: Install, configure, operate, verify, and troubleshoot the Fabric Rust CLI and daemon for trusted cross-machine socket transport over iroh. Use when Codex needs to connect machines with Fabric, manage peer trust, expose or dial Unix/TCP/exec services, configure the managed user service, diagnose reachability, or develop and validate the compoundingtech/fabric repository.
+description: Install, configure, operate, verify, and troubleshoot the Fabric Rust CLI and daemon for trusted cross-machine socket transport over iroh. Use when connecting machines with Fabric, managing peer trust, exposing or dialing Unix/TCP/exec services, syncing folders between trusted peers (fabric sync), configuring the managed user service, diagnosing reachability, or developing and validating the compoundingtech/fabric repository.
 ---
 
 # Fabric
@@ -76,6 +76,31 @@ fabric dial <peer> <protocol> --tcp <local-host:port>
 
 Give the printed socket path or TCP address to the consumer. Do not make the
 consumer import iroh types or implement Fabric's peer checks.
+
+## Sync Folders
+
+Use `fabric sync` to keep a folder converged with trusted peers. Declare sync
+entries in the authoritative `~/.config/fabric/syncs.toml` (a sibling of
+`peers.toml`, hand-editable and provisionable); the running daemon watches each
+folder and syncs changes over the reserved `fabric/sync/1` ALPN, gated by the
+same peer allow-list.
+
+Each `[[sync]]` entry is `{name, folder, peers, policy}` plus optional `include`
+globs. Use the SAME `name` on every machine that shares a sync; local `folder`
+paths may differ. `peers = "*"` means every peer in `peers.toml`. Choose
+`policy = "catalog"` (union, newer-wins, never deletes on a peer — a deletion is
+restored, decommission via an edit) or `policy = "bus"` (adds tombstone deletes).
+
+```sh
+fabric sync add <folder> --name <name> --peers "*" --policy catalog
+fabric sync ls
+fabric sync reload
+```
+
+`fabric sync add` writes `syncs.toml` and reloads; `fabric sync reload` applies a
+hand-edited or provisioned file without a restart. Prefer newer-wins on the
+logical version, not filesystem mtime. A fresh box is declare-then-reload, no
+interactive step.
 
 ## Operate The Daemon
 
