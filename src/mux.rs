@@ -6,9 +6,10 @@
 //! connection handles to leak. This module consolidates to one persistent,
 //! multipath connection per peer: a [`PeerConnections`] manager opens it on
 //! demand, caches it, and hands out streams. Each stream begins with a
-//! [`MuxStreamHeader`] naming the target protocol and the tunnel session id, so
-//! the accepting side routes the stream to the right exposure — subsuming the old
-//! per-ALPN dispatch into per-stream routing.
+//! [`MuxStreamHeader`] naming the target protocol, so the accepting side routes
+//! the stream to the right exposure — subsuming the old per-ALPN dispatch into
+//! per-stream routing. (The tunnel session id and resume offset ride in the
+//! tunnel's own framing, so resume is unchanged.)
 //!
 //! The manager is keyed by peer id, so it works for an N-peer mesh, not just one
 //! pair. The resumable offset+ACK tunnel framing rides each stream unchanged; a
@@ -111,10 +112,10 @@ impl PeerConnections {
         Self::default()
     }
 
-    /// Open a mux stream to `peer_addr`'s exposure `protocol` for `session_id`,
-    /// reusing the peer's shared connection (opening it if needed, re-opening it
-    /// once if the cached one has died). Returns the stream with its header
-    /// already written, ready for the tunnel framing.
+    /// Open a mux stream to `peer_addr`'s exposure `protocol`, reusing the peer's
+    /// shared connection (opening it if needed, re-opening it once if the cached
+    /// one has died). Returns the stream with its header already written, ready
+    /// for the tunnel framing.
     pub async fn open_stream(
         &self,
         endpoint: &Endpoint,
