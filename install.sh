@@ -122,11 +122,17 @@ install_binary() {
     if ! "$target" --help 2>/dev/null | grep -q "Local socket facade for iroh-backed cross-machine transports"; then
       die "refusing to overwrite non-fabric file at $target"
     fi
-    rm -f "$target"
   fi
 
-  cp "$src" "$target"
-  chmod 755 "$target"
+  # Install atomically via a temp file in the same directory, then rename over
+  # the target. rename(2) relinks the path to the new inode while a running
+  # daemon keeps executing the old one — no ETXTBSY ("text file busy") and no
+  # window where the path is missing. `fabric restart` then re-execs the new
+  # binary at this same path, which is how a live daemon is swapped in place.
+  tmp="$target.new.$$"
+  cp "$src" "$tmp"
+  chmod 755 "$tmp"
+  mv -f "$tmp" "$target"
   INSTALLED_TARGET="$target"
   echo "installed: $target"
   echo "ensure $INSTALL_DIR is on PATH"
