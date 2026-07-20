@@ -30,33 +30,32 @@ pub const MUX_ALPN: &[u8] = b"fabric/mux/1";
 
 /// Largest protocol name accepted in a stream header (ALPN-scale).
 const MAX_PROTOCOL_LEN: usize = 255;
-/// Tunnel session id length, matching `tunnel::TunnelSessionId`.
-pub const SESSION_ID_LEN: usize = 16;
 
-/// The first bytes of every mux stream: which exposure it targets and the tunnel
-/// session it belongs to (for resume). Wire format:
-/// `[u16 BE protocol_len][protocol utf8][16 bytes session_id]`.
+/// The first bytes of every mux stream: which exposure it targets, replacing the
+/// old per-ALPN dispatch with per-stream routing. Wire format:
+/// `[u16 BE protocol_len][protocol utf8]`.
+///
+/// The header carries only the protocol; the tunnel session id (and resume
+/// offset) already ride in the tunnel's own `Frame::Hello`, so the resumable
+/// attach/resume framing sits on the stream unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MuxStreamHeader {
     pub protocol: String,
-    pub session_id: [u8; SESSION_ID_LEN],
 }
 
 impl MuxStreamHeader {
-    pub fn new(protocol: impl Into<String>, session_id: [u8; SESSION_ID_LEN]) -> Self {
+    pub fn new(protocol: impl Into<String>) -> Self {
         Self {
             protocol: protocol.into(),
-            session_id,
         }
     }
 
     /// Encode the header to bytes.
     pub fn encode(&self) -> Vec<u8> {
         let proto = self.protocol.as_bytes();
-        let mut out = Vec::with_capacity(2 + proto.len() + SESSION_ID_LEN);
+        let mut out = Vec::with_capacity(2 + proto.len());
         out.extend_from_slice(&(proto.len() as u16).to_be_bytes());
         out.extend_from_slice(proto);
-        out.extend_from_slice(&self.session_id);
         out
     }
 
@@ -92,14 +91,7 @@ impl MuxStreamHeader {
             .await
             .context("read mux header protocol")?;
         let protocol = String::from_utf8(proto).context("mux protocol is not utf8")?;
-        let mut session_id = [0u8; SESSION_ID_LEN];
-        recv.read_exact(&mut session_id)
-            .await
-            .context("read mux header session id")?;
-        Ok(Self {
-            protocol,
-            session_id,
-        })
+        Ok(Self { protocol })
     }
 }
 
@@ -128,9 +120,8 @@ impl PeerConnections {
         endpoint: &Endpoint,
         peer_addr: &EndpointAddr,
         protocol: &str,
-        session_id: [u8; SESSION_ID_LEN],
     ) -> Result<(SendStream, RecvStream)> {
-        let header = MuxStreamHeader::new(protocol.to_string(), session_id);
+        let header = MuxStreamHeader::new(protocol.to_string());
 
         // First attempt on the cached (or freshly opened) connection.
         let connection = self.get_or_open(endpoint, peer_addr).await?;
@@ -210,10 +201,10 @@ mod tests {
 
     #[test]
     fn header_round_trips_through_bytes() {
-        let header = MuxStreamHeader::new("pty-view", [7u8; SESSION_ID_LEN]);
+        let header = MuxStreamHeader::new("pty-view");
         let bytes = header.encode();
-        // len(8) + "pty-view"(8) + 16 = 26.
-        assert_eq!(bytes.len(), 2 + 8 + SESSION_ID_LEN);
+        // len(2) + "pty-view"(8) = 10.
+        assert_eq!(bytes.len(), 2 + 8);
         assert_eq!(&bytes[0..2], &8u16.to_be_bytes());
     }
 
@@ -266,11 +257,9 @@ mod tests {
         let client = Endpoint::bind(presets::N0).await?;
         let manager = PeerConnections::new();
 
-        // Open two logical streams with different protocols + session ids.
-        for (proto, sid) in [("pty-view", [1u8; 16]), ("demo-http", [2u8; 16])] {
-            let (mut send, mut recv) = manager
-                .open_stream(&client, &server_addr, proto, sid)
-                .await?;
+        // Open two logical streams with different protocols on the same peer.
+        for proto in ["pty-view", "demo-http"] {
+            let (mut send, mut recv) = manager.open_stream(&client, &server_addr, proto).await?;
             send.write_all(b"ping").await?;
             send.finish()?;
             let mut buf = [0u8; 4];
