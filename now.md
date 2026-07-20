@@ -4,7 +4,7 @@ The living handoff for whoever owns fabric next (there was none before; keep thi
 current). This records what is DONE, what is IN FLIGHT, and what is NEXT — the
 things the repo history alone does not carry.
 
-_Last updated: 2026-07-20 by fabric-claude (opus)._
+_Last updated: 2026-07-20 by fabric-claude (opus). fabric 0.2.0 on origin main (HEAD 1ceaae7)._
 
 ## What fabric is
 
@@ -19,14 +19,14 @@ fabric now owns file sync. A config file (`syncs.toml`) lists sync entries; the
 running daemon watches each folder and keeps it converged with its peers.
 
 Status:
-- **Landed + pushed to origin main:** the config surface (`syncs.toml`) and the
-  property-tested reconciliation core (`src/sync/{config,manifest,node,glob}`),
-  plus the on-wire backend (`src/sync/wire.rs`).
-- **Landed locally (daemon/CLI increment — committing/pushing):** the async
-  `SyncEngine` (`src/sync/engine.rs`, fs-watch + scan/materialize), the daemon
-  wiring (`fabric/sync/1` ALPN, `IrohSyncTransport`, engine started at boot,
-  `SyncReload`/`SyncStatus` control ops), and the `fabric sync add/ls/rm/reload`
-  CLI. Proven end-to-end over real iroh by `tests/sync_slice.rs`.
+**Fully landed + pushed to origin main (fabric 0.2.0):** the config surface
+(`syncs.toml`) and the property-tested reconciliation core
+(`src/sync/{config,manifest,node,glob}`), the on-wire backend
+(`src/sync/wire.rs`), the async `SyncEngine` (`src/sync/engine.rs`, fs-watch +
+scan/materialize), the daemon wiring (`fabric/sync/1` ALPN, `IrohSyncTransport`,
+engine started at boot, `SyncReload`/`SyncStatus` control ops), and the
+`fabric sync add/ls/rm/reload` CLI. Proven end-to-end over real iroh by
+`tests/sync_slice.rs`. All tests green; CLI smoke-tested; zero warnings.
 
 Design decisions (why, so they are not re-litigated):
 - **Backend-agnostic semantics.** The merge/conflict/delete/echo/convergence
@@ -47,11 +47,17 @@ Design decisions (why, so they are not re-litigated):
 
 ## Next
 
-1. Commit + push the daemon/CLI increment (after the existing integration tests
-   confirm green with the always-on engine).
-2. Ping convoy-claude to declare its catalog entry, then run the **real hetz
-   proof** (Mac → Hetzner) with the CoS. convoy owns generating a per-network
-   name (`convoy-catalog-<network>`).
+1. **Fleet redeploy before the hetz proof** (CoS-coordinated). The *installed*
+   fabric binaries are stale/pre-sync (`~/.local/bin/fabric` was 0.1.7+940afd1).
+   A machine only serves/dials sync after its running daemon is **restarted**
+   onto the 0.2.0 binary — a fresh file on disk is not enough. fabric-claude owns
+   build + `./install.sh` + `fabric restart`; the Mac daemon restart blips the
+   live network so the CoS sequences the window; the CoS drives the hetz
+   pull+build+restart.
+2. Run the **real hetz proof** (Mac → Hetzner): convoy declares the catalog on
+   both (per-network name `convoy-catalog-<network>`), drop a `host=hetz` job in
+   the Mac catalog, it appears on hetz, hetz's `convoy up` launches it. This is
+   the done-bar.
 3. Evaluate **iroh-docs 0.101.0** (iroh `^1`, range-based set reconciliation,
    LWW, iroh-blobs content) as backend #2 and green the SAME conformance suite
    against it. If healthy it likely becomes the production backend; `fast_rsync`
