@@ -93,3 +93,54 @@ Integration-level acceptance:
 - Do not replace network-change or RSS recovery. This is an additional trigger.
 - Do not make service supervision responsible for this class. A managed service
   can restart crashes, but this failure happened inside a healthy process.
+
+## Decided Direction (2026-07-20)
+
+Investigation (log evidence + iroh 1.0.2 source) established two composing facts:
+
+- iroh 1.0 connections are **multipath**: one connection carries several paths
+  (direct v4/v6, relay), each with its own RTT and a *selected* path, exposed via
+  `Connection::paths()` / per-path `rtt()` / `is_selected()` / `path_events()`.
+- fabric today opens **one iroh connection per tunnel/socket** (N connections per
+  peer, `max_per_peer = 16`), so there are N independent path-states to manage —
+  the same shape as the connection-handle memory leak.
+
+iroh exposes **no fine-grained per-path evict/re-select** API: only
+`Endpoint::network_change()` (coarse re-probe) or a fresh `connect()` / restart.
+So a degraded-but-*validated* selected path cannot be individually dropped; the
+lever is re-dialing the connection to force fresh path selection.
+
+Decided build (Nathan, 2026-07-20):
+
+1. **Consolidate to exactly one multipath QUIC connection per machine-pair.**
+   Multiplex every logical socket/tunnel as a QUIC stream on that shared
+   connection. Result: one path-state per peer to health-check and one place to
+   apply a selection fix, and far fewer connection handles. Keyed by peer so it
+   works for an N-peer mesh, not just one pair.
+2. **Selection-stickiness fix: re-dial + reselect, do not pin relay.** A
+   path-quality monitor watches the selected path's RTT; on persistent
+   degradation (multiplier over baseline AND an absolute floor, over consecutive
+   samples, suppressed across generation changes) it re-dials the peer connection
+   so iroh re-selects a healthy path — which may be relay, but is not *pinned* to
+   relay.
+3. **Heavy, durable instrumentation** (per-path RTT, selected path, UDP 4-tuple,
+   path events, reconnects, degradation windows) so reliability is proven with
+   evidence. See `src/pathwatch.rs`.
+
+## Future Experiment: Dual-Path Bonding (parked)
+
+Not to be built now — captured here at Nathan's request as a named future
+experiment. Once the single-multipath-connection-per-peer design is reliable and
+instrumented:
+
+- Deliberately keep **two paths active at once** (e.g. a direct path and a relay
+  path, or two direct paths across different interfaces) instead of only the one
+  iroh selects.
+- **Bond / multiplex across both** for (a) higher reliability — traffic survives
+  one path degrading without waiting for re-selection — and (b) higher aggregate
+  bandwidth by striping across paths.
+- Open questions to evaluate when it is picked up: does iroh expose enough to pin
+  and drive two paths simultaneously (today path selection is automatic and
+  single-selected); scheduling/reordering across bonded paths; and whether the
+  reliability win justifies the complexity over fast re-selection on one
+  connection.
