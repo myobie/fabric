@@ -644,6 +644,20 @@ async fn exec_expose_spawn_failure_closes_local_stream_and_daemon_survives() -> 
     let ping = node_b.ping("node-a").await?;
     assert_eq!(ping.bytes, 32);
 
+    fs::write(
+        node_a_home.peers_path(),
+        "[[peers]]\nid = \"not-a-node-id\"\n",
+    )?;
+    assert!(
+        run_fabric(&node_a_home, &["reload-peers"]).is_err(),
+        "invalid peers.toml unexpectedly reloaded"
+    );
+    let ping = node_b.ping("node-a").await?;
+    assert_eq!(
+        ping.bytes, 32,
+        "failed reload should preserve the previously loaded allow-list"
+    );
+
     node_b.shutdown().await?;
     node_a.shutdown().await?;
     Ok(())
@@ -709,7 +723,7 @@ async fn exec_expose_streams_payload_larger_than_tunnel_buffer() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unified_config_restores_shell_peers_and_exposes_on_restart() -> Result<()> {
+async fn separate_peer_and_daemon_configs_restore_on_restart() -> Result<()> {
     let _guard = local_slice_guard().await;
     let node_a_dir = TempDir::new()?;
     let node_b_dir = TempDir::new()?;
@@ -747,8 +761,10 @@ async fn unified_config_restores_shell_peers_and_exposes_on_restart() -> Result<
     );
     let raw_config = fs::read_to_string(node_a_home.config_path())?;
     assert!(raw_config.contains("allow_shell = true"));
-    assert!(raw_config.contains("node-b"));
     assert!(raw_config.contains("stdio-cat"));
+    assert!(!raw_config.contains("node-b"));
+    let raw_peers = fs::read_to_string(node_a_home.peers_path())?;
+    assert!(raw_peers.contains("node-b"));
 
     node_a.shutdown().await?;
     let node_a = FabricNode::start(node_a_home.clone()).await?;
@@ -1053,7 +1069,7 @@ async fn status_reports_peer_reachability() -> Result<()> {
     )
     .await?;
 
-    let response = send_control(&node_b_home, ControlRequest::ReachabilityStatus).await?;
+    let response = wait_for_reachability_status(&node_b_home).await?;
     let ControlResponse::ReachabilityStatus { version, peers, .. } = response else {
         panic!("unexpected response: {response:?}");
     };
@@ -1103,7 +1119,44 @@ async fn declarative_peer_config_is_loaded_on_start() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_peer_config_is_migrated_when_daemon_creates_config_on_start() -> Result<()> {
+async fn declarative_peer_config_can_be_reloaded_without_restart() -> Result<()> {
+    let _guard = local_slice_guard().await;
+    let node_a_dir = TempDir::new()?;
+    let node_b_dir = TempDir::new()?;
+    let node_a_home = FabricHome::new(node_a_dir.path());
+    let node_b_home = FabricHome::new(node_b_dir.path());
+
+    let node_a = FabricNode::start(node_a_home.clone()).await?;
+    let node_b = FabricNode::start(node_b_home.clone()).await?;
+    trust_peer(
+        &node_b_home,
+        &node_b,
+        node_a.id(),
+        Some("node-a"),
+        Some(node_a.addr()),
+    )
+    .await?;
+
+    assert!(
+        node_b.ping("node-a").await.is_err(),
+        "node A unexpectedly trusted node B before peers.toml reload"
+    );
+    fs::write(
+        node_a_home.peers_path(),
+        format!("[[peers]]\nid = \"{}\"\nname = \"node-b\"\n", node_b.id()),
+    )?;
+    assert_eq!(run_fabric(&node_a_home, &["reload-peers"])?, "reloaded");
+
+    let ping = node_b.ping("node-a").await?;
+    assert_eq!(ping.bytes, 32);
+
+    node_b.shutdown().await?;
+    node_a.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_file_remains_authoritative_when_daemon_config_is_created() -> Result<()> {
     let _guard = local_slice_guard().await;
     let node_a_dir = TempDir::new()?;
     let node_b_dir = TempDir::new()?;
@@ -1131,11 +1184,12 @@ async fn legacy_peer_config_is_migrated_when_daemon_creates_config_on_start() ->
     assert_eq!(ping.bytes, 32);
     let raw_config = fs::read_to_string(node_a_home.config_path())?;
     assert!(raw_config.contains("allow_shell = true"));
-    assert!(raw_config.contains("node-b"));
+    assert!(!raw_config.contains("node-b"));
     assert!(
-        !node_a_home.peers_path().exists(),
-        "legacy peers.toml should be retired after config migration"
+        node_a_home.peers_path().exists(),
+        "peers.toml should remain the authoritative allow-list"
     );
+    assert!(fs::read_to_string(node_a_home.peers_path())?.contains("node-b"));
 
     node_b.shutdown().await?;
     node_a.shutdown().await?;
@@ -1175,6 +1229,16 @@ async fn wait_for_status(home: &FabricHome) -> Result<ControlResponse> {
         }
     }
     send_control(home, ControlRequest::Status).await
+}
+
+async fn wait_for_reachability_status(home: &FabricHome) -> Result<ControlResponse> {
+    for _ in 0..50 {
+        match send_control(home, ControlRequest::ReachabilityStatus).await {
+            Ok(response) => return Ok(response),
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+    send_control(home, ControlRequest::ReachabilityStatus).await
 }
 
 async fn assert_status_exposes(home: &FabricHome, protocol: &str) -> Result<()> {

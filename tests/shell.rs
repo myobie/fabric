@@ -67,6 +67,7 @@ async fn restart_from_remote_shell_detaches_and_preserves_allow_shell() -> Resul
         Some(node_a_addr),
     )
     .await?;
+    wait_for_cli_status(&node_b_home, false).await?;
 
     let before = run_shell(
         &node_b_home,
@@ -162,6 +163,7 @@ async fn trusted_peer_with_allow_shell_runs_remote_shell_and_propagates_exit() -
         Some(node_a.addr()),
     )
     .await?;
+    wait_for_cli_status(&node_b_home, false).await?;
 
     let output = run_shell(
         &node_b_home,
@@ -205,6 +207,7 @@ async fn trusted_peer_without_allow_shell_is_refused() -> Result<()> {
         Some(node_a.addr()),
     )
     .await?;
+    wait_for_cli_status(&node_b_home, false).await?;
 
     let output = run_shell(&node_b_home, "node-a", "exit 0\n")?;
     assert_eq!(output.status.code(), Some(126));
@@ -236,6 +239,7 @@ async fn untrusted_peer_is_refused_even_when_shell_is_allowed() -> Result<()> {
         Some(node_a.addr()),
     )
     .await?;
+    wait_for_cli_status(&node_c_home, false).await?;
 
     let output = run_shell(&node_c_home, "node-a", "echo should-not-run\n")?;
     assert!(

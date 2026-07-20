@@ -51,6 +51,8 @@ enum Commands {
     Status,
     /// List trusted peers.
     Peers,
+    /// Reload peers.toml into the running daemon.
+    ReloadPeers,
     /// Trust a peer NodeID and optionally assign a local name.
     Add {
         nodeid: String,
@@ -291,6 +293,10 @@ async fn main() -> Result<()> {
                             None => println!("{}", peer.id),
                         }
                     }
+                }
+                Commands::ReloadPeers => {
+                    send_control(&home, ControlRequest::ReloadPeers).await?;
+                    println!("reloaded");
                 }
                 Commands::Add {
                     nodeid,

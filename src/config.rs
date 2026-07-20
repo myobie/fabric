@@ -91,19 +91,13 @@ impl FabricHome {
             .cloned()
     }
 
-    fn remove_legacy_peer_configs(&self) -> Result<()> {
-        let mut paths = vec![self.peer_config_path.clone()];
+    fn remove_legacy_peer_config(&self) -> Result<()> {
         if let Some(path) = &self.legacy_peer_config_path
             && path != &self.peer_config_path
+            && path.exists()
         {
-            paths.push(path.clone());
-        }
-
-        for path in paths {
-            if path.exists() {
-                fs::remove_file(&path)
-                    .with_context(|| format!("failed to remove {}", path.display()))?;
-            }
+            fs::remove_file(path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
         }
         Ok(())
     }
@@ -219,27 +213,30 @@ pub struct PeerBook {
 
 impl PeerBook {
     pub fn load(home: &FabricHome) -> Result<Self> {
-        if home.config_path().exists() {
-            let mut config = FabricConfig::load(home)?;
-            if !config.peers.is_empty() {
-                return Ok(Self {
-                    peers: config.peers,
-                });
+        if let Some((path, book)) = Self::load_existing(home)? {
+            if path != home.peers_path() {
+                book.write_peer_file(home)?;
+                home.remove_legacy_peer_config()?;
             }
-
-            let Some(book) = Self::load_existing(home)? else {
-                return Ok(Self::default());
-            };
-            config.peers = book.peers.clone();
-            config.save(home)?;
-            home.remove_legacy_peer_configs()?;
-            return Ok(Self { peers: book.peers });
+            Self::remove_embedded_config_peers(home)?;
+            return Ok(book);
         }
 
-        Ok(Self::load_existing(home)?.unwrap_or_default())
+        let mut config = FabricConfig::load(home)?;
+        if config.peers.is_empty() {
+            return Ok(Self::default());
+        }
+
+        let book = Self {
+            peers: std::mem::take(&mut config.peers),
+        };
+        book.validate()?;
+        book.write_peer_file(home)?;
+        config.save(home)?;
+        Ok(book)
     }
 
-    fn load_existing(home: &FabricHome) -> Result<Option<Self>> {
+    fn load_existing(home: &FabricHome) -> Result<Option<(PathBuf, Self)>> {
         let Some(path) = home.existing_peers_path() else {
             return Ok(None);
         };
@@ -248,17 +245,34 @@ impl PeerBook {
         let book: Self =
             toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))?;
         book.validate()?;
-        Ok(Some(book))
+        Ok(Some((path, book)))
     }
 
     pub fn save(&self, home: &FabricHome) -> Result<()> {
-        home.prepare()?;
         self.validate()?;
-        let mut config = FabricConfig::load(home)?;
-        config.peers = self.peers.clone();
-        config.save(home)?;
-        home.remove_legacy_peer_configs()?;
+        self.write_peer_file(home)?;
+        home.remove_legacy_peer_config()?;
+        Self::remove_embedded_config_peers(home)?;
         Ok(())
+    }
+
+    fn write_peer_file(&self, home: &FabricHome) -> Result<()> {
+        home.prepare()?;
+        let path = home.peers_path();
+        let raw = toml::to_string_pretty(self)?;
+        fs::write(&path, raw).with_context(|| format!("failed to write {}", path.display()))
+    }
+
+    fn remove_embedded_config_peers(home: &FabricHome) -> Result<()> {
+        if !home.config_path().exists() {
+            return Ok(());
+        }
+        let mut config = FabricConfig::load(home)?;
+        if config.peers.is_empty() {
+            return Ok(());
+        }
+        config.peers.clear();
+        config.save(home)
     }
 
     pub fn peers(&self) -> &[Peer] {
@@ -306,7 +320,9 @@ impl PeerBook {
                 .addr
                 .clone()
                 .unwrap_or_else(|| EndpointAddr::new(entry.id))),
-            [] => bail!("unknown peer {peer:?}; add it with `fabric add <nodeid> [name]`"),
+            [] => bail!(
+                "unknown peer {peer:?}; add it to peers.toml or use `fabric add <nodeid> [name]`"
+            ),
             _ => bail!("ambiguous peer name {peer:?}"),
         }
     }
@@ -320,8 +336,12 @@ impl PeerBook {
     }
 
     fn validate(&self) -> Result<()> {
+        let mut ids = HashSet::new();
         let mut names = HashMap::new();
         for peer in &self.peers {
+            if !ids.insert(peer.id) {
+                bail!("duplicate peer id {}", peer.id);
+            }
             if let Some(name) = &peer.name {
                 if name.trim().is_empty() {
                     bail!("peer name cannot be empty");
@@ -392,7 +412,7 @@ pub struct FabricConfig {
     allow_shell: Option<bool>,
     #[serde(default)]
     server_sessions: ServerSessionConfig,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     peers: Vec<Peer>,
     #[serde(default)]
     exposes: Vec<PersistedExpose>,
@@ -624,6 +644,39 @@ fn short_hash(input: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_config_rejects_duplicate_node_ids() {
+        let id = SecretKey::generate().public();
+        let book: PeerBook = toml::from_str(&format!(
+            "[[peers]]\nid = \"{id}\"\nname = \"first\"\n\n\
+             [[peers]]\nid = \"{id}\"\nname = \"second\"\n"
+        ))
+        .unwrap();
+
+        let error = book.validate().unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("duplicate peer id"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn peer_config_accepts_documented_address_hint_shape() {
+        let id = SecretKey::generate().public();
+        let book: PeerBook = toml::from_str(&format!(
+            "[[peers]]\nid = \"{id}\"\nname = \"workstation\"\n\n\
+             [peers.addr]\nid = \"{id}\"\n\n\
+             [[peers.addr.addrs]]\nRelay = \"https://relay.example.com/\"\n\n\
+             [[peers.addr.addrs]]\nIp = \"203.0.113.10:11204\"\n"
+        ))
+        .unwrap();
+
+        book.validate().unwrap();
+        assert_eq!(book.peers().len(), 1);
+        assert_eq!(book.peers()[0].addr.as_ref().unwrap().id, id);
+    }
 
     #[test]
     fn server_session_config_uses_defaults_when_missing() {

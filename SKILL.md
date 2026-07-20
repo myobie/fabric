@@ -32,13 +32,17 @@ Use the same Fabric release on both machines.
 
 1. Run `fabric id` on each machine.
 2. Exchange the two stable NodeIDs over a trusted channel.
-3. On machine A, run `fabric add <machine-b-node-id> machine-b`.
-4. On machine B, run `fabric add <machine-a-node-id> machine-a`.
-5. Run `fabric up` on both machines.
-6. Run `fabric status` and `fabric ping <peer-name>` on each machine.
+3. Write each remote NodeID to the local authoritative `peers.toml` as an
+   `[[peers]]` entry with required `id` and optional unique `name`.
+4. Run `fabric up` on both machines. Use `fabric reload-peers` instead when the
+   daemon is already running.
+5. Run `fabric status` and `fabric ping <peer-name>` on each machine.
 
 Require mutual allow-list entries. A remote daemon rejects a NodeID that is not
 in its own peer config even when the dialing machine trusts it.
+
+Treat `fabric add <nodeid> [name]` as a convenience writer, not a provisioning
+requirement. Automated provisioning should install the complete peer file.
 
 Treat a successful `pong` as the basic connection check. It reports round-trip
 latency and, when available, the `direct`, `relay`, or `mixed` transport path.
@@ -108,22 +112,25 @@ Use `~/.local/share/fabric` as the default runtime home and
 and command invocations on that same home.
 
 Treat `identity.toml` as a secret because it contains the persisted private
-key. Treat `peers.toml` and `config.toml` as declarative authorization and
-service configuration.
+key. Treat `peers.toml` as the authoritative authorization file and
+`config.toml` as daemon policy and exposure configuration. Reject duplicate
+NodeIDs, duplicate or empty names, and address hints whose ID differs from the
+peer ID.
 
 ## Troubleshoot
 
 Check these surfaces in order:
 
 1. Run `fabric --version` on both machines and align versions.
-2. Run `fabric status` to confirm the daemon, NodeID, trust entries, and peer
-   reachability.
-3. Run `fabric peers` and confirm mutual trust.
-4. Run `fabric ping <peer>` before debugging an exposed application protocol.
-5. Inspect `<home>/logs/daemon.log` for a daemon started by `fabric up`, or
+2. Run `fabric peers` to validate and inspect the peer file.
+3. Run `fabric reload-peers` after changing that file on a running daemon.
+4. Run `fabric status` to confirm the daemon loaded the expected trust entries
+   and peer reachability.
+5. Run `fabric ping <peer>` before debugging an exposed application protocol.
+6. Inspect `<home>/logs/daemon.log` for a daemon started by `fabric up`, or
    `<home>/logs/service.out.log` and `service.err.log` for a managed service.
-6. Confirm that expose and dial commands use the same protocol string.
-7. Run `fabric restart` after a persistent transport failure; use
+7. Confirm that expose and dial commands use the same protocol string.
+8. Run `fabric restart` after a persistent transport failure; use
    `fabric restart --no-allow-shell` when shell must remain disabled.
 
 Use `fabric addr` and `fabric add --addr-json` only for deterministic

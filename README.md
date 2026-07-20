@@ -34,6 +34,10 @@ fabric add <machine-b-node-id> machine-b
 fabric up
 ```
 
+`fabric add` is only a convenience writer. Automated or image-based installs
+can deploy the complete authorized-keys file instead; see
+[Declarative Peer Config](#declarative-peer-config).
+
 Trust machine A on machine B:
 
 ```sh
@@ -193,8 +197,13 @@ writes:
 ```
 
 If `--home <dir>` or `FABRIC_HOME=<dir>` is set, fabric reads and writes
-`<dir>/peers.toml` instead. The daemon loads this file on `fabric up`; it is the
-endpoint allow-list.
+`<dir>/peers.toml` instead. The daemon loads this authoritative allow-list on
+startup and when `fabric reload-peers` is run.
+
+Older default-home installs may have peer entries in
+`~/.local/share/fabric/config.toml` or `~/.local/share/fabric/peers.toml`.
+Fabric migrates those entries to `~/.config/fabric/peers.toml`; an existing
+canonical `peers.toml` wins.
 
 ## Commands
 
@@ -222,7 +231,15 @@ Print this node's stable NodeID, generating and persisting it on first use.
 fabric peers
 ```
 
-List trusted peers. The peer list is the daemon's endpoint allow-list.
+Read and list the entries in the authoritative `peers.toml`.
+
+```sh
+fabric reload-peers
+```
+
+Validate `peers.toml` and apply it to the running daemon without restarting.
+The daemon keeps its previously loaded allow-list if parsing or validation
+fails.
 
 ```sh
 fabric status
@@ -302,9 +319,9 @@ default to at most 32 active children per exposure; use `--max-children` to set
 a different per-exposure cap.
 
 Exposes are persisted by default to `<home>/config.toml` and are restored when
-the daemon starts. That same file also stores shell policy and trusted peers
-written by `fabric add`. Use `--ephemeral` for short-lived test exposes that
-should not survive a daemon restart.
+the daemon starts. That same file also stores shell policy; `fabric add` writes
+the separate authoritative `peers.toml`. Use `--ephemeral` for short-lived test
+exposes that should not survive a daemon restart.
 
 Only allow-listed remote NodeIDs are accepted before the local socket is opened
 or the local TCP connection / exec command is started.
@@ -419,17 +436,73 @@ stop the daemon, and it does not affect the built-in `fabric shell` ALPN.
 
 ## Declarative Peer Config
 
-`peers.toml` is intentionally human-editable. The minimal form is:
+`peers.toml` is Fabric's authorized-keys file. It is intentionally
+human-editable and can be provisioned before Fabric ever runs. Each
+`[[peers]]` entry accepts:
+
+- `id` (required): the peer's 64-character hexadecimal iroh NodeID.
+- `name` (optional): a non-empty, unique local alias for commands such as
+  `fabric ping workstation`.
+- `addr` (optional): an iroh `EndpointAddr` hint whose `id` must match the
+  peer's `id`.
+
+NodeIDs and names must be unique. Normal cross-machine setup should omit
+`addr`; NodeID-based iroh discovery supplies the current addresses.
+
+The usual file contains only NodeIDs and optional names:
 
 ```toml
 [[peers]]
-id = "peer-node-id-hex"
+id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 name = "workstation"
+
+[[peers]]
+id = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+name = "server"
 ```
 
-`name` is optional. Address hints are optional too; normal key-only dialing uses
-iroh address lookup. Local deterministic tests can include the address-hint TOML
-that `fabric add <nodeid> <name> --addr-json "$(fabric addr)"` writes.
+An explicit address hint, mainly useful for deterministic tests, has this exact
+TOML shape:
+
+```toml
+[[peers]]
+id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+name = "workstation"
+
+[peers.addr]
+id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[[peers.addr.addrs]]
+Relay = "https://relay.example.com/"
+
+[[peers.addr.addrs]]
+Ip = "203.0.113.10:11204"
+```
+
+Prefer generating hint data with
+`fabric add <nodeid> <name> --addr-json "$(fabric addr)"` instead of writing it
+by hand.
+
+For the default home, install a prepared file and apply it without any
+interactive command:
+
+```sh
+FABRIC_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fabric"
+install -d -m 755 "$FABRIC_CONFIG_DIR"
+install -m 644 ./peers.toml "$FABRIC_CONFIG_DIR/peers.toml"
+fabric reload-peers
+fabric peers
+fabric status
+```
+
+If the daemon is not running yet, omit `fabric reload-peers`; `fabric up`,
+`fabric up --foreground`, and the managed service all read the file at startup.
+With `FABRIC_HOME=/srv/fabric`, install it as `/srv/fabric/peers.toml` and use
+that same environment for every Fabric command.
+
+Removing an entry and reloading prevents new connections from that NodeID.
+Reloading does not forcibly close an already active tunnel or shell; restart in
+a safe maintenance window when immediate disconnection is required.
 
 ## Provision And Go
 
@@ -448,15 +521,20 @@ id = "existing-machine-node-id"
 name = "workstation"
 ```
 
-Pre-add the new box NodeID to the existing machines, either with `fabric add` or
-by editing their `peers.toml`:
+On every existing machine, add the new box to its canonical `peers.toml`:
 
-```sh
-fabric add "$BOX_ID" new-box
+```toml
+[[peers]]
+id = "<new-box-node-id>"
+name = "new-box"
 ```
 
-Install the generated identity and peer config on the new box before first boot.
-For the default paths:
+Replace `<new-box-node-id>` with the value printed in `BOX_ID`, deploy the file
+with the machine's normal configuration-management or file-copy mechanism, and
+run `fabric reload-peers` on a daemon that is already running.
+
+Install the generated identity and prepared peer config on the new box before
+first boot. For the default paths:
 
 ```sh
 mkdir -p ~/.local/share/fabric ~/.config/fabric
@@ -602,12 +680,13 @@ client machine                                      server machine
 ```
 
 The daemon owns one persisted iroh endpoint per fabric home. `<home>/config.toml`
-stores shell policy, trusted peers, and persisted exposes. `fabric expose`
-registers an ALPN and a local Unix socket, TCP, or exec target in the running
-daemon and, by default, writes it to that config. On startup, the daemon restores
-those exposes before binding its accepted ALPN list. Incoming iroh connections
-pass through an `EndpointHooks::after_handshake` allow-list check before the
-daemon connects to a socket/TCP target or spawns an exec target.
+stores shell policy and persisted exposes; `peers.toml` stores the peer
+allow-list. `fabric expose` registers an ALPN and a local Unix socket, TCP, or
+exec target in the running daemon and, by default, writes it to `config.toml`.
+On startup, the daemon restores those exposes before binding its accepted ALPN
+list. Incoming iroh connections pass through an
+`EndpointHooks::after_handshake` allow-list check before the daemon connects to
+a socket/TCP target or spawns an exec target.
 
 `fabric dial` registers a local Unix listener under `<home>/dials`. Each local
 connection gets a random tunnel session id bound to the remote peer id. Generic

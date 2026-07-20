@@ -257,8 +257,8 @@ Notes:
   verify `fabric status` still lists `pty-view`; no manual re-expose should be
   needed unless the target socket path changes. Use `fabric unexpose pty-view`
   to retire the durable mapping.
-- `<home>/config.toml` is the durable daemon config for shell policy, trusted
-  peers, and exposes.
+- `<home>/config.toml` is the durable daemon config for shell policy and
+  exposes. The authoritative trusted-peer allow-list is `peers.toml`.
 - The companion unit is only needed for older fabric builds without
   `<home>/config.toml` persisted-expose support.
 
