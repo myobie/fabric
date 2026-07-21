@@ -6,29 +6,29 @@ things the repo history alone does not carry.
 
 _Last updated: 2026-07-21 by fabric-claude (opus). fabric 0.2.0 on origin main._
 
-## Hotfix STAGED — peer-config split (awaiting the restart window)
+## Hotfix DEPLOYED — peer-config split (resolved 2026-07-21)
 
 On 2026-07-21 the Mac↔hetz stopgap sync (rsync over `fabric dial`) failed in a
 loop and blocked cos from reaching the hetz fleet. Root cause: the launchd
-service launches the daemon as `--home ~/.local/share/fabric`, which (pre-fix)
+service launched the daemon as `--home ~/.local/share/fabric`, which (pre-fix)
 made the dial path read `peers.toml` from under `--home` while the CLI writes
 `~/.config/fabric/peers.toml`; a default-home `fabric add` migrated + deleted the
 in-`--home` copy, leaving the daemon with zero peers on the dial path
 (`unknown peer` in `service.err.log`) while `ping`/`status`/`shell` kept working.
 
-- **Live link:** RESTORED (stopgap = write hetzner into the daemon-home
-  `peers.toml`; survives restarts as long as it is not re-deleted).
-- **Durable fix:** landed on main — `FabricHome::resolve` now treats an explicit
-  `--home` equal to the default state root like the no-arg default (peers from
-  `~/.config/fabric/`). Unit-tested; binary installed to `~/.local/bin/fabric`.
-- **NOT yet active:** the running daemon still uses the OLD binary. cos sequences
-  the restart window with Nathan, likely folded into the fabric-sync redeploy.
-  Safe swap: install (done) → verify peers resolve under `--home` → bootstrap the
-  `com.myobie.fabric` launchd service (currently unmanaged — no KeepAlive).
-  Post-swap TODO: ping smalltalk-claude so it can soften its KNOWN-LIMITS entry
-  (`e9c2f5a`) from "landed-not-deployed" to just the durable state.
-- **Until the swap:** do NOT run a default-home `fabric add`/`remove` (re-splits
-  peers), and do NOT `fabric restart`/bootstrap on the old binary (re-lockout).
+- **Durable fix (commit `9f5391b`):** `FabricHome::resolve` treats an explicit
+  `--home`/`FABRIC_HOME` equal to the default state root like the no-arg default
+  (peers from `~/.config/fabric/`); a genuinely different `--home` stays isolated.
+  Unit-tested (`resolve_from` + 6 regression tests).
+- **DEPLOYED:** as of ~17:33 the Mac daemon runs the fixed binary
+  (`0.2.0+9f5391b`, pid rotates under launchd) — swapped via stop-old →
+  `fabric service install`. Verified: hetzner reachable, dial probe returns
+  bytes, sync log clean bidirectional cycles, no fresh `unknown peer`.
+- **launchd label changed:** the service is now `com.compoundingtech.fabric`
+  (was `com.myobie.fabric`, org rename). The stale `com.myobie.fabric` job was
+  booted out and its plist moved aside to `*.stale-501`. Use the new label.
+- **Holds LIFTED:** default-home `fabric add`/`remove` and `fabric restart` are
+  safe again — the daemon reads the same `~/.config/fabric/peers.toml` as the CLI.
 
 ## What fabric is
 
