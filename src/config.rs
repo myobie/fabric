@@ -25,23 +25,51 @@ pub struct FabricHome {
 
 impl FabricHome {
     pub fn resolve(home: Option<PathBuf>) -> Result<Self> {
-        if let Some(root) = home {
-            return Ok(Self::new(root));
+        let explicit = home.or_else(|| env::var_os("FABRIC_HOME").map(PathBuf::from));
+        let home_dir = env::var_os("HOME").map(PathBuf::from);
+        let config_root = env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+        Self::resolve_from(explicit, home_dir.as_deref(), config_root)
+    }
+
+    /// Pure resolution (env already read) so it is unit-testable without
+    /// mutating process env.
+    ///
+    /// An explicit root equal to the default state root
+    /// (`<HOME>/.local/share/fabric`) resolves peers/config from the XDG config
+    /// dir exactly like the no-argument default. This matters because the
+    /// service always launches the daemon as `--home <default-root>`: without
+    /// this, the daemon would read `peers.toml` from under its `--home` while
+    /// the interactive CLI reads `~/.config/fabric/peers.toml`, so a `fabric add`
+    /// (or a restart-triggered migration) could silently leave the daemon with
+    /// zero peers — a lockout. A genuinely different `--home`/`FABRIC_HOME`
+    /// keeps the isolated config-under-root layout.
+    fn resolve_from(
+        explicit: Option<PathBuf>,
+        home_dir: Option<&Path>,
+        config_root: Option<PathBuf>,
+    ) -> Result<Self> {
+        let default = home_dir.map(|home| Self::default_layout(home, config_root));
+        match explicit {
+            Some(root) => {
+                if let Some(default) = default.as_ref()
+                    && default.root == root
+                {
+                    return Ok(default.clone());
+                }
+                Ok(Self::new(root))
+            }
+            None => default.context("HOME is not set; pass --home or FABRIC_HOME"),
         }
-        if let Some(root) = env::var_os("FABRIC_HOME") {
-            return Ok(Self::new(root));
-        }
-        let home = env::var_os("HOME").context("HOME is not set; pass --home or FABRIC_HOME")?;
-        let home = PathBuf::from(home);
+    }
+
+    fn default_layout(home: &Path, config_root: Option<PathBuf>) -> Self {
         let root = home.join(".local/share/fabric");
-        let config_root = env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".config"));
-        Ok(Self {
+        let config_root = config_root.unwrap_or_else(|| home.join(".config"));
+        Self {
             peer_config_path: config_root.join("fabric/peers.toml"),
             legacy_peer_config_path: Some(root.join("peers.toml")),
             root,
-        })
+        }
     }
 
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -78,8 +106,9 @@ impl FabricHome {
     }
 
     /// Authoritative sync-entry file, a sibling of `peers.toml` in the same
-    /// config directory (`~/.config/fabric/syncs.toml` for the default home,
-    /// `<home>/syncs.toml` when `--home` or `FABRIC_HOME` is set).
+    /// config directory (`~/.config/fabric/syncs.toml` for the default home and
+    /// for an explicit `--home` that points at the default state root;
+    /// `<home>/syncs.toml` for a non-default `--home`/`FABRIC_HOME`).
     pub fn syncs_path(&self) -> PathBuf {
         self.peer_config_path.with_file_name("syncs.toml")
     }
@@ -651,6 +680,76 @@ fn short_hash(input: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_default_home_puts_peers_in_xdg_config() {
+        let home = PathBuf::from("/home/alice");
+        let fh = FabricHome::resolve_from(None, Some(&home), None).unwrap();
+        assert_eq!(fh.root, PathBuf::from("/home/alice/.local/share/fabric"));
+        assert_eq!(
+            fh.peers_path(),
+            PathBuf::from("/home/alice/.config/fabric/peers.toml")
+        );
+        assert_eq!(
+            fh.legacy_peer_config_path,
+            Some(PathBuf::from("/home/alice/.local/share/fabric/peers.toml"))
+        );
+    }
+
+    #[test]
+    fn resolve_explicit_default_root_matches_default_layout() {
+        // Regression: the service launches the daemon as `--home <default-root>`,
+        // so it MUST resolve peers exactly like the no-argument CLI (XDG config),
+        // not from `<home>/peers.toml`. Reading the wrong file left the daemon
+        // with zero peers and took down the cross-machine bus.
+        let home = PathBuf::from("/home/alice");
+        let explicit = PathBuf::from("/home/alice/.local/share/fabric");
+        let fh = FabricHome::resolve_from(Some(explicit), Some(&home), None).unwrap();
+        assert_eq!(
+            fh.peers_path(),
+            PathBuf::from("/home/alice/.config/fabric/peers.toml"),
+            "explicit --home at the default root must read XDG-config peers"
+        );
+        assert_eq!(
+            fh.legacy_peer_config_path,
+            Some(PathBuf::from("/home/alice/.local/share/fabric/peers.toml"))
+        );
+    }
+
+    #[test]
+    fn resolve_explicit_custom_root_stays_isolated() {
+        let home = PathBuf::from("/home/alice");
+        let explicit = PathBuf::from("/tmp/fabric-test-home");
+        let fh = FabricHome::resolve_from(Some(explicit.clone()), Some(&home), None).unwrap();
+        assert_eq!(fh.root, explicit);
+        assert_eq!(fh.peers_path(), explicit.join("peers.toml"));
+        assert_eq!(fh.legacy_peer_config_path, None);
+    }
+
+    #[test]
+    fn resolve_explicit_root_without_home_env_is_isolated() {
+        let explicit = PathBuf::from("/tmp/fabric-test-home");
+        let fh = FabricHome::resolve_from(Some(explicit.clone()), None, None).unwrap();
+        assert_eq!(fh.root, explicit);
+        assert_eq!(fh.peers_path(), explicit.join("peers.toml"));
+    }
+
+    #[test]
+    fn resolve_without_home_env_errors() {
+        let error = FabricHome::resolve_from(None, None, None).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("HOME is not set"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn resolve_default_home_respects_xdg_config_home() {
+        let home = PathBuf::from("/home/alice");
+        let xdg = PathBuf::from("/xdg/conf");
+        let fh = FabricHome::resolve_from(None, Some(&home), Some(xdg)).unwrap();
+        assert_eq!(fh.peers_path(), PathBuf::from("/xdg/conf/fabric/peers.toml"));
+    }
 
     #[test]
     fn peer_config_rejects_duplicate_node_ids() {

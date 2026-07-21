@@ -6,6 +6,22 @@ EXPERIMENTAL, so on-disk formats and the CLI may change without notice.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Peer-config split when the daemon runs with `--home <default-root>`.** The
+  managed service always launches the daemon as
+  `--home ~/.local/share/fabric`, which made it read `peers.toml` from under that
+  `--home` while the interactive CLI reads `~/.config/fabric/peers.toml`. A
+  default-home `fabric add` then migrated peers to the config dir and removed the
+  in-`--home` copy, silently leaving the daemon with **zero peers**: `ping`/
+  `status`/`shell` still worked (in-memory allow-list) but every **dial** failed
+  with `unknown peer` — taking down consumers like `st sync` (endless
+  `fabric pull failed … re-dialing`) with a real lockout risk on peers with no
+  fallback access. An explicit `--home`/`FABRIC_HOME` equal to the default state
+  root now resolves peers/config exactly like the no-argument default; a
+  genuinely different `--home` keeps the isolated config-under-root layout. See
+  the new [Troubleshooting](README.md#troubleshooting) note.
+
 ## [0.2.0] - 2026-07-20
 
 ### Added — `fabric sync` (generic file-sync primitive)

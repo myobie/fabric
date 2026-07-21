@@ -4,7 +4,29 @@ The living handoff for whoever owns fabric next (there was none before; keep thi
 current). This records what is DONE, what is IN FLIGHT, and what is NEXT — the
 things the repo history alone does not carry.
 
-_Last updated: 2026-07-20 by fabric-claude (opus). fabric 0.2.0 on origin main (HEAD 1ceaae7)._
+_Last updated: 2026-07-21 by fabric-claude (opus). fabric 0.2.0 on origin main._
+
+## Hotfix STAGED — peer-config split (awaiting the restart window)
+
+On 2026-07-21 the Mac↔hetz stopgap sync (rsync over `fabric dial`) failed in a
+loop and blocked cos from reaching the hetz fleet. Root cause: the launchd
+service launches the daemon as `--home ~/.local/share/fabric`, which (pre-fix)
+made the dial path read `peers.toml` from under `--home` while the CLI writes
+`~/.config/fabric/peers.toml`; a default-home `fabric add` migrated + deleted the
+in-`--home` copy, leaving the daemon with zero peers on the dial path
+(`unknown peer` in `service.err.log`) while `ping`/`status`/`shell` kept working.
+
+- **Live link:** RESTORED (stopgap = write hetzner into the daemon-home
+  `peers.toml`; survives restarts as long as it is not re-deleted).
+- **Durable fix:** landed on main — `FabricHome::resolve` now treats an explicit
+  `--home` equal to the default state root like the no-arg default (peers from
+  `~/.config/fabric/`). Unit-tested; binary installed to `~/.local/bin/fabric`.
+- **NOT yet active:** the running daemon still uses the OLD binary. cos sequences
+  the restart window with Nathan, likely folded into the fabric-sync redeploy.
+  Safe swap: install (done) → verify peers resolve under `--home` → bootstrap the
+  `com.myobie.fabric` launchd service (currently unmanaged — no KeepAlive).
+- **Until the swap:** do NOT run a default-home `fabric add`/`remove` (re-splits
+  peers), and do NOT `fabric restart`/bootstrap on the old binary (re-lockout).
 
 ## What fabric is
 

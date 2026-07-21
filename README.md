@@ -237,9 +237,14 @@ writes:
 ~/.config/fabric/peers.toml
 ```
 
-If `--home <dir>` or `FABRIC_HOME=<dir>` is set, fabric reads and writes
-`<dir>/peers.toml` instead. The daemon loads this authoritative allow-list on
-startup and when `fabric reload-peers` is run.
+If `--home <dir>` or `FABRIC_HOME=<dir>` points at a **non-default** directory,
+fabric reads and writes `<dir>/peers.toml` instead — an isolated node with its
+own allow-list. As a deliberate exception, an explicit `--home`/`FABRIC_HOME`
+equal to the **default** state root (`~/.local/share/fabric`) still uses
+`~/.config/fabric/peers.toml`, so the managed service — which always launches the
+daemon as `--home <default-root>` — and the interactive CLI never disagree about
+where peers live. The daemon loads this authoritative allow-list on startup and
+when `fabric reload-peers` is run.
 
 Older default-home installs may have peer entries in
 `~/.local/share/fabric/config.toml` or `~/.local/share/fabric/peers.toml`.
@@ -595,6 +600,43 @@ that same environment for every Fabric command.
 Removing an entry and reloading prevents new connections from that NodeID.
 Reloading does not forcibly close an already active tunnel or shell; restart in
 a safe maintenance window when immediate disconnection is required.
+
+## Troubleshooting
+
+### Sync stalls or "unknown peer" after a daemon restart
+
+**Symptom.** `fabric ping`, `fabric status`, and `fabric shell` all report the
+peer as reachable, yet anything that goes through a **dial** — `fabric dial`, or
+a consumer like `st sync` — fails on a loop. `st sync` shows
+`fabric pull failed: <peer>::… — re-dialing` forever, and
+`~/.local/share/fabric/logs/service.err.log` shows
+`dial socket connection failed: unknown peer "<peer>"`.
+
+**Cause.** A peer-config **split** between the daemon and the CLI. `ping`/`status`
+answer from the daemon's in-memory allow-list, but the dial/tunnel path
+re-resolves the peer from `peers.toml` on disk each connection. If the daemon was
+launched with a `--home` whose `peers.toml` is missing or empty while the CLI
+writes to a different `peers.toml`, the dial path resolves nothing → the tunnel
+never opens → the consumer's socket gets zero bytes and times out. This is a
+fabric transport issue, not a consumer bug (e.g. `st sync`'s
+`SyncFailedError`-on-`rsync --timeout` is that consumer behaving correctly). A
+default-home `fabric add`/`remove` can trigger the split by migrating peers to
+`~/.config/fabric/peers.toml` and removing the legacy in-`--home` copy.
+
+**Fix.** Make sure the peers file the daemon actually reads contains the peer,
+then reload:
+
+```sh
+# Confirm the running daemon's --home (e.g. from `ps` or the service plist),
+# then point every command at that same home so the CLI and daemon agree:
+fabric --home <daemon-home> add <nodeid> <name>
+fabric --home <daemon-home> reload-peers
+fabric --home <daemon-home> status      # peer should now be reachable AND dialable
+```
+
+On current fabric an explicit `--home` equal to the default state root resolves
+peers from `~/.config/fabric/peers.toml` (see [State](#state)), so a
+service-launched daemon and the interactive CLI can no longer diverge this way.
 
 ## Provision And Go
 
