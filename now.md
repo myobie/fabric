@@ -25,6 +25,8 @@ in-`--home` copy, leaving the daemon with zero peers on the dial path
   the restart window with Nathan, likely folded into the fabric-sync redeploy.
   Safe swap: install (done) → verify peers resolve under `--home` → bootstrap the
   `com.myobie.fabric` launchd service (currently unmanaged — no KeepAlive).
+  Post-swap TODO: ping smalltalk-claude so it can soften its KNOWN-LIMITS entry
+  (`e9c2f5a`) from "landed-not-deployed" to just the durable state.
 - **Until the swap:** do NOT run a default-home `fabric add`/`remove` (re-splits
   peers), and do NOT `fabric restart`/bootstrap on the old binary (re-lockout).
 
