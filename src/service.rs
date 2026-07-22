@@ -87,6 +87,23 @@ impl ServiceSpec {
 }
 
 pub fn install(home: &FabricHome, options: ServiceInstallOptions) -> Result<()> {
+    // The managed OS-service is a PROD-only concept, under a single global label.
+    // Installing it against a dev/custom home would register a SECOND service on
+    // the same label that fights the prod daemon (the service-vs-manual race).
+    // A dev instance runs manually via `fabric up` on its own --home instead.
+    if !home.is_default_state_root() {
+        let default = FabricHome::default_state_root()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "$HOME/.local/share/fabric".to_string());
+        bail!(
+            "refusing to install the managed fabric service for a non-default home ({}).\n\
+             The managed service is prod-only and lives on the default home ({default}); a second \
+             managed service would fight the prod daemon.\n\
+             For a dev instance, run it manually instead: `fabric --home {0} up` \
+             (or set FABRIC_HOME to that home).",
+            home.root().display(),
+        );
+    }
     home.prepare()?;
     let allow_shell = resolve_allow_shell(home, options.allow_shell)?;
     let allow_exec = resolve_allow_exec(home, options.allow_exec)?;

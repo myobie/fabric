@@ -85,6 +85,20 @@ impl FabricHome {
         &self.root
     }
 
+    /// The conventional default (prod) state root, `$HOME/.local/share/fabric`.
+    /// `None` only if `HOME` is unset. Independent of `FABRIC_HOME` — this is the
+    /// canonical prod location, not whatever a dev override points at.
+    pub fn default_state_root() -> Option<PathBuf> {
+        env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share/fabric"))
+    }
+
+    /// True if this home is the default prod state root (i.e. NOT a dev/custom
+    /// home). The managed OS-service is prod-only, so `service install` and the
+    /// mutating-op mismatch guard key off this.
+    pub fn is_default_state_root(&self) -> bool {
+        Self::default_state_root().is_some_and(|default| default == self.root)
+    }
+
     pub fn prepare(&self) -> Result<()> {
         fs::create_dir_all(self.root.join("run"))?;
         fs::create_dir_all(self.root.join("dials"))?;
@@ -742,6 +756,21 @@ mod tests {
         let fh = FabricHome::resolve_from(Some(explicit.clone()), None, None).unwrap();
         assert_eq!(fh.root, explicit);
         assert_eq!(fh.peers_path(), explicit.join("peers.toml"));
+    }
+
+    #[test]
+    fn non_default_home_is_not_the_default_state_root() {
+        // A dev/custom home must never register as the prod default root — that's
+        // what makes `service install` refuse it and keeps dev off the prod service.
+        let dev = FabricHome::new("/tmp/fabric-dev-xyz");
+        assert!(!dev.is_default_state_root());
+    }
+
+    #[test]
+    fn the_computed_default_root_is_the_default_state_root() {
+        if let Some(default) = FabricHome::default_state_root() {
+            assert!(FabricHome::new(default).is_default_state_root());
+        }
     }
 
     #[test]

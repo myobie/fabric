@@ -251,6 +251,42 @@ Older default-home installs may have peer entries in
 Fabric migrates those entries to `~/.config/fabric/peers.toml`; an existing
 canonical `peers.toml` wins.
 
+## Developing Fabric (dev vs prod)
+
+A production fabric daemon is often load-bearing (it may be your only path to a
+remote machine), so **hack on fabric without touching the prod daemon** by
+running a **dev instance on its own home**. Because a home owns its control
+socket, identity/NodeID, config, and (ephemerally) its UDP port, a dev instance
+on a distinct home is structurally unable to collide with prod.
+
+Set `FABRIC_HOME` once for your dev shell and every `fabric` command targets the
+dev instance — nothing to forget:
+
+```sh
+export FABRIC_HOME=~/.local/share/fabric-dev   # or a repo-local ./.fabric-dev
+fabric up                                       # a manual dev daemon on its own home
+fabric status                                   # talks to the dev daemon, not prod
+fabric down                                     # stops only the dev daemon
+```
+
+Rules that keep dev and prod from fighting:
+
+- **Prod is the only OS-managed service.** `fabric service install` **refuses a
+  non-default home** — a second managed service would share the one global
+  service label and fight the prod daemon. Dev instances run manually via
+  `fabric up`, never as an installed service.
+- **Mutating commands warn on a home mismatch.** If `fabric down`/`restart`
+  can't reach a daemon at the target home but one *is* running on the default
+  home, fabric warns you (you probably forgot `--home`/`FABRIC_HOME`, or your dev
+  daemon is down).
+- **The default home is prod.** A bare `fabric …` with no `--home`/`FABRIC_HOME`
+  targets `~/.local/share/fabric` — that's the prod daemon. Keep `FABRIC_HOME`
+  set while developing.
+
+The same pattern applies to any per-instance daemon: per-instance
+home/socket/identity, prod is the one service, dev is a manual run on a distinct
+home.
+
 ## Commands
 
 ```sh

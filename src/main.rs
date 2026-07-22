@@ -404,7 +404,10 @@ async fn main() -> Result<()> {
                     }
                 }
                 Commands::Down => {
-                    send_control(&home, ControlRequest::Shutdown).await?;
+                    if let Err(error) = send_control(&home, ControlRequest::Shutdown).await {
+                        warn_home_daemon_mismatch(&home).await;
+                        return Err(error);
+                    }
                     println!("stopped");
                 }
                 Commands::Restart {
@@ -412,7 +415,16 @@ async fn main() -> Result<()> {
                     no_allow_shell,
                 } => {
                     let allow_shell = allow_override(allow_shell, no_allow_shell);
-                    match send_control(&home, ControlRequest::Restart { allow_shell }).await? {
+                    let response = match send_control(&home, ControlRequest::Restart { allow_shell })
+                        .await
+                    {
+                        Ok(response) => response,
+                        Err(error) => {
+                            warn_home_daemon_mismatch(&home).await;
+                            return Err(error);
+                        }
+                    };
+                    match response {
                         ControlResponse::Restarting { log, allow_shell } => {
                             println!("restart scheduled");
                             println!("log\t{}", log.display());
@@ -1052,6 +1064,32 @@ async fn run_exec_client(socket: &PathBuf, cmd: &[String]) -> Result<i32> {
     stdout.flush().await?;
     stderr.flush().await?;
     Ok(exit_code)
+}
+
+/// When a mutating command (down/restart) can't reach a daemon at the target
+/// home, warn if a daemon IS running on the DEFAULT (prod) home — the common dev
+/// footgun of forgetting --home/FABRIC_HOME (or the dev daemon being down). The
+/// command still fails on its own "not running" error; this just adds the hint.
+async fn warn_home_daemon_mismatch(target: &FabricHome) {
+    if target.is_default_state_root() {
+        return;
+    }
+    let Some(default_root) = FabricHome::default_state_root() else {
+        return;
+    };
+    if target.root() == default_root.as_path() {
+        return;
+    }
+    let default_sock = default_root.join("run/control.sock");
+    if tokio::net::UnixStream::connect(&default_sock).await.is_ok() {
+        eprintln!(
+            "fabric: no daemon at --home {}, but a fabric daemon IS running on the default home \
+             {} — did you forget --home/FABRIC_HOME (dev commands must target your dev home), or \
+             is your dev daemon down?",
+            target.root().display(),
+            default_root.display(),
+        );
+    }
 }
 
 async fn run_debug_echo(socket: PathBuf) -> Result<()> {
