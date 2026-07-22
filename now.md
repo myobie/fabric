@@ -96,24 +96,23 @@ Design decisions (why, so they are not re-litigated):
    local two-node e2e test (allow + deny + stderr split + exit codes); that test
    caught a real bug — `dial_alpn` routed exec through the mux tunnel whose Hello
    frame corrupted the argv; exec now uses the raw dial path like shell.
-   **Combined deploy bundle — LOCKED, ONE Nathan-gated window = main HEAD:**
-   roaming self-heal (`298a593`) + `fabric exec` (`4d02a01`/`4fe8557`) +
-   service-install idempotency (`83a3614`) + dev/prod isolation (`a9b336e`:
-   service-install refuses a non-default home, down/restart home-mismatch guard,
-   README FABRIC_HOME-for-dev convention). Fold-in is FINAL (cos's superseding
-   "LOCKED" decision — earlier decouple/tag approach retired; no tag). Build the
-   Mac binary from **main HEAD**. New binary on Mac AND hetz + `--allow-exec` on
-   hetz so cos can `fabric exec hetzner -- <cmd>`. Rollback:
-   `~/.local/bin/fabric.prev` = 9f5391b.
+   **THIS deploy (ONE Nathan-gated window) = tag `deploy-roaming-exec-bootout`
+   (`1964c99`):** roaming self-heal (`298a593`) + `fabric exec` (`4d02a01`/
+   `4fe8557`) + service-install idempotency (`83a3614`), **ZERO isolation**. Build
+   the Mac binary from THAT tag (not HEAD). **DECOUPLE is FINAL** — cos's one-word
+   answer to end a multi-round fold-in/decouple bounce; do NOT reopen. New binary
+   on Mac AND hetz + `--allow-exec` on hetz so cos can `fabric exec hetzner --
+   <cmd>`. Rollback: `~/.local/bin/fabric.prev` = 9f5391b. Runbook verify:
+   `fabric status` shows `exec allowed` on hetz + `fabric exec hetzner -- echo ok`
+   + `peer_health_probe` telemetry + a laptop roaming self-heal test.
 
-   **Deploy runbook verify (Nathan present, fabric.prev ready):** (a) REGRESSION —
-   default-home `fabric service install` still succeeds + the managed daemon comes
-   up (`fabric status` reachable, shell allowed) — the one risk the isolation could
-   add; (b) FEATURE — `fabric --home /tmp/x service install` refused,
-   `fabric --home /tmp/empty down` warns about the running default daemon; (c)
-   exec — `fabric status` shows `exec allowed` on hetz + `fabric exec hetzner --
-   echo ok`; (d) roaming — `peer_health_probe` telemetry + a laptop-moves-networks
-   self-heal test.
+   **SEPARATE follow-up (its own small validation, NOT this window, NO Nathan
+   window):** dev/prod isolation (`a9b336e`, on main but NOT in the deploy tag):
+   service-install refuses a non-default home, down/restart home-mismatch guard,
+   README FABRIC_HOME-for-dev convention. Standalone validation before it lands
+   live: default/prod-home `service install` still succeeds; a non-default home is
+   refused; `down`/`restart` on an empty home warns. Design:
+   `docs/dev-prod-isolation.md`.
 
    **Deferred:** the `fabric dev` subcommand (env convention covers it), the
    Erlang idle-skip probe refinement (low urgency), and `fabric cp`/discovery
