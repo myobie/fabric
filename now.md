@@ -88,6 +88,18 @@ Design decisions (why, so they are not re-litigated):
      move a laptop between networks, confirm self-heal without a manual restart.
    - Analysis + reliability data + nix design: `docs/multi-machine-reliability-2026-07-22.md`.
 
+0b. **`fabric exec` — non-interactive remote command execution (Nathan 2026-07-22).
+   BUILT + STAGED, same deploy window as the roaming fix.** `fabric exec <peer> --
+   <cmd>` = scriptable counterpart to `shell` (stream stdout/stderr, propagate
+   exit code). DEFAULT-DENY per machine via `allow_exec` (`--allow-exec` on
+   up/daemon/service install), separate ALPN `fabric/exec/0`. Validated with a
+   local two-node e2e test (allow + deny + stderr split + exit codes); that test
+   caught a real bug — `dial_alpn` routed exec through the mux tunnel whose Hello
+   frame corrupted the argv; exec now uses the raw dial path like shell.
+   **Combined deploy:** the roaming fix + exec ship together in ONE Nathan-gated
+   window (new binary on Mac AND hetz + `--allow-exec` on hetz so cos can
+   `fabric exec hetzner -- <cmd>`). Rollback: `~/.local/bin/fabric.prev` = 9f5391b.
+
 1. **Fleet redeploy before the hetz proof** (CoS-coordinated). The *installed*
    fabric binaries are stale/pre-sync (`~/.local/bin/fabric` was 0.1.7+940afd1).
    A machine only serves/dials sync after its running daemon is **restarted**

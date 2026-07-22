@@ -6,6 +6,26 @@ EXPERIMENTAL, so on-disk formats and the CLI may change without notice.
 
 ## [Unreleased]
 
+### Added
+
+- **`fabric exec <peer> -- <cmd...>`** — non-interactive remote command
+  execution: run a command on a trusted peer with no tty, stream its stdout and
+  stderr back on separate streams, and exit with the remote command's exit code.
+  The scriptable counterpart to `shell`. Security mirrors `shell` and is
+  **default-deny per machine** (`allow_exec`, opt-in via `--allow-exec` on
+  `up`/`daemon`/`service install`), under a separate ALPN (`fabric/exec/0`) so
+  allowing exec never implies shell. `fabric status` now reports `exec allowed`.
+
+### Changed
+
+- **Roaming self-heal.** The daemon now actively echo-probes each trusted peer
+  (`FABRIC_PEER_HEALTH_SECS`, default 20s) and, on repeated failures, drives
+  recovery (drop tunnels → iroh `network_change()` re-discovery → endpoint
+  recycle) — so a peer that roams to a new network no longer stays unreachable
+  both ways until a manual daemon restart. Previously the daemon only reacted to
+  *local* network changes and never checked per-peer reachability. Each probe
+  also emits latency + direct/relay telemetry.
+
 ### Fixed
 
 - **Peer-config split when the daemon runs with `--home <default-root>`.** The
