@@ -12,6 +12,7 @@ pub const DEFAULT_MEMORY_MAX_MB: u64 = 1024;
 #[derive(Debug, Clone, Copy)]
 pub struct ServiceInstallOptions {
     pub allow_shell: Option<bool>,
+    pub allow_exec: Option<bool>,
     pub memory_max_mb: u64,
 }
 
@@ -20,6 +21,7 @@ pub struct ServiceSpec {
     exe: PathBuf,
     home: PathBuf,
     allow_shell: bool,
+    allow_exec: bool,
     memory_max_mb: u64,
 }
 
@@ -28,6 +30,7 @@ impl ServiceSpec {
         exe: impl Into<PathBuf>,
         home: impl Into<PathBuf>,
         allow_shell: bool,
+        allow_exec: bool,
         memory_max_mb: u64,
     ) -> Result<Self> {
         if memory_max_mb == 0 {
@@ -37,13 +40,19 @@ impl ServiceSpec {
             exe: exe.into(),
             home: home.into(),
             allow_shell,
+            allow_exec,
             memory_max_mb,
         })
     }
 
-    fn current(home: &FabricHome, allow_shell: bool, memory_max_mb: u64) -> Result<Self> {
+    fn current(
+        home: &FabricHome,
+        allow_shell: bool,
+        allow_exec: bool,
+        memory_max_mb: u64,
+    ) -> Result<Self> {
         let exe = env::current_exe().context("failed to resolve current fabric executable")?;
-        Self::new(exe, home.root(), allow_shell, memory_max_mb)
+        Self::new(exe, home.root(), allow_shell, allow_exec, memory_max_mb)
     }
 
     fn program_arguments(&self) -> Vec<String> {
@@ -56,6 +65,9 @@ impl ServiceSpec {
         if self.allow_shell {
             args.push("--allow-shell".to_string());
         }
+        if self.allow_exec {
+            args.push("--allow-exec".to_string());
+        }
         args
     }
 }
@@ -63,7 +75,8 @@ impl ServiceSpec {
 pub fn install(home: &FabricHome, options: ServiceInstallOptions) -> Result<()> {
     home.prepare()?;
     let allow_shell = resolve_allow_shell(home, options.allow_shell)?;
-    let spec = ServiceSpec::current(home, allow_shell, options.memory_max_mb)?;
+    let allow_exec = resolve_allow_exec(home, options.allow_exec)?;
+    let spec = ServiceSpec::current(home, allow_shell, allow_exec, options.memory_max_mb)?;
     match ServiceManager::current()? {
         #[cfg(target_os = "linux")]
         ServiceManager::SystemdUser => install_systemd_user(&spec)?,
@@ -73,6 +86,7 @@ pub fn install(home: &FabricHome, options: ServiceInstallOptions) -> Result<()> 
     println!("installed");
     println!("home\t{}", home.root().display());
     println!("allow-shell\t{allow_shell}");
+    println!("allow-exec\t{allow_exec}");
     println!("memory-max-mb\t{}", options.memory_max_mb);
     Ok(())
 }
@@ -111,6 +125,16 @@ fn resolve_allow_shell(home: &FabricHome, requested: Option<bool>) -> Result<boo
         return Ok(allow_shell);
     }
     Ok(config.allow_shell().unwrap_or(false))
+}
+
+fn resolve_allow_exec(home: &FabricHome, requested: Option<bool>) -> Result<bool> {
+    let mut config = FabricConfig::load(home)?;
+    if let Some(allow_exec) = requested {
+        config.set_allow_exec(allow_exec);
+        config.save(home)?;
+        return Ok(allow_exec);
+    }
+    Ok(config.allow_exec().unwrap_or(false))
 }
 
 enum ServiceManager {
@@ -384,6 +408,7 @@ mod tests {
             "/usr/local/bin/fabric",
             "/home/nathan/.local/share/fabric",
             false,
+            false,
             DEFAULT_MEMORY_MAX_MB,
         )?;
 
@@ -400,12 +425,13 @@ mod tests {
             "/usr/local/bin/fabric",
             "/home/nathan/.local/share/fabric",
             true,
+            true,
             512,
         )?;
 
         let unit = render_systemd_user_unit(&spec);
 
-        assert!(unit.contains("ExecStart=/usr/local/bin/fabric --home /home/nathan/.local/share/fabric daemon --allow-shell"));
+        assert!(unit.contains("ExecStart=/usr/local/bin/fabric --home /home/nathan/.local/share/fabric daemon --allow-shell --allow-exec"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("RestartSec=5s"));
         assert!(unit.contains("MemoryMax=512M"));
@@ -418,6 +444,7 @@ mod tests {
         let spec = ServiceSpec::new(
             "/Applications/Fabric Tools/fabric",
             "/Users/nathan/Fabric 100%",
+            false,
             false,
             256,
         )?;
@@ -436,6 +463,7 @@ mod tests {
             "/Users/nathan/.local/bin/fabric",
             home.root(),
             false,
+            false,
             DEFAULT_MEMORY_MAX_MB,
         )?;
 
@@ -449,7 +477,8 @@ mod tests {
     #[test]
     fn launch_agent_runs_foreground_daemon_with_keepalive_and_memory_limit() -> Result<()> {
         let home = FabricHome::new("/Users/nathan/.local/share/fabric");
-        let spec = ServiceSpec::new("/Users/nathan/.local/bin/fabric", home.root(), true, 512)?;
+        let spec =
+            ServiceSpec::new("/Users/nathan/.local/bin/fabric", home.root(), true, true, 512)?;
 
         let plist = render_launch_agent_plist(&home, &spec)?;
 
@@ -459,6 +488,7 @@ mod tests {
         assert!(plist.contains("<string>/Users/nathan/.local/share/fabric</string>"));
         assert!(plist.contains("<string>daemon</string>"));
         assert!(plist.contains("<string>--allow-shell</string>"));
+        assert!(plist.contains("<string>--allow-exec</string>"));
         assert!(plist.contains("<key>SuccessfulExit</key>"));
         assert!(plist.contains("<false/>"));
         assert!(plist.contains("<key>ResidentSetSize</key>"));
@@ -469,7 +499,7 @@ mod tests {
     #[test]
     fn launch_agent_xml_escapes_paths() -> Result<()> {
         let home = FabricHome::new("/Users/nathan/Fabric & Test");
-        let spec = ServiceSpec::new("/tmp/fabric<dev>", home.root(), false, 128)?;
+        let spec = ServiceSpec::new("/tmp/fabric<dev>", home.root(), false, false, 128)?;
 
         let plist = render_launch_agent_plist(&home, &spec)?;
 

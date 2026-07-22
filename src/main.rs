@@ -17,6 +17,7 @@ use fabric::{
     daemon::{
         DaemonOptions, FabricNode, init_daemon_tracing, run_daemon_with_options, send_control,
     },
+    exec,
     service::{self, DEFAULT_MEMORY_MAX_MB, ServiceInstallOptions},
     shell::{self, ServerFrame},
     sync::config::{SyncBook, SyncEntry, SyncPeers, SyncPolicy},
@@ -72,6 +73,10 @@ enum Commands {
         /// Serve remote shells to trusted peers.
         #[arg(long)]
         allow_shell: bool,
+        /// Serve non-interactive remote command execution (`fabric exec`) to
+        /// trusted peers. Default-deny — arbitrary remote code, opt-in only.
+        #[arg(long)]
+        allow_exec: bool,
         /// Maximum total server-side tunnel sessions.
         #[arg(long)]
         server_session_max_total: Option<usize>,
@@ -133,6 +138,16 @@ enum Commands {
     Ping { peer: String },
     /// Open an interactive remote shell on a trusted peer.
     Shell { peer: String },
+    /// Run a command on a trusted peer non-interactively: stream its stdout and
+    /// stderr back and exit with the remote command's exit code. The scriptable
+    /// counterpart to `shell`, e.g. `fabric exec hetz -- ls -la`.
+    Exec {
+        /// The trusted peer to run the command on.
+        peer: String,
+        /// The command and its arguments (put `--` before it to end fabric's flags).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        cmd: Vec<String>,
+    },
     /// Manage declarative file-sync entries (syncs.toml).
     Sync {
         #[command(subcommand)]
@@ -154,6 +169,8 @@ enum Commands {
     Daemon {
         #[arg(long)]
         allow_shell: bool,
+        #[arg(long)]
+        allow_exec: bool,
         #[arg(long)]
         server_session_max_total: Option<usize>,
         #[arg(long)]
@@ -195,6 +212,13 @@ enum ServiceCommands {
         /// Persist remote shell serving as disabled for the managed daemon.
         #[arg(long)]
         no_allow_shell: bool,
+        /// Start the managed daemon with non-interactive remote exec enabled
+        /// (`fabric exec`). Default-deny — opt-in only.
+        #[arg(long, conflicts_with = "no_allow_exec")]
+        allow_exec: bool,
+        /// Persist remote exec serving as disabled for the managed daemon.
+        #[arg(long)]
+        no_allow_exec: bool,
         /// Memory ceiling applied by systemd/launchd, in MiB.
         #[arg(long, default_value_t = DEFAULT_MEMORY_MAX_MB)]
         memory_max_mb: u64,
@@ -303,6 +327,7 @@ async fn main() -> Result<()> {
                             exposed_protocols,
                             dial_sockets,
                             allow_shell,
+                            allow_exec,
                             peers,
                         } => {
                             print_status(
@@ -312,6 +337,7 @@ async fn main() -> Result<()> {
                                 &exposed_protocols,
                                 &dial_sockets,
                                 allow_shell,
+                                allow_exec,
                                 &peers,
                             )?;
                         }
@@ -354,12 +380,14 @@ async fn main() -> Result<()> {
                 Commands::Up {
                     foreground,
                     allow_shell,
+                    allow_exec,
                     server_session_max_total,
                     server_session_max_per_peer,
                     server_session_detached_ttl_secs,
                 } => {
                     let options = daemon_options(
                         allow_shell,
+                        allow_exec,
                         server_session_max_total,
                         server_session_max_per_peer,
                         server_session_detached_ttl_secs,
@@ -383,7 +411,7 @@ async fn main() -> Result<()> {
                     allow_shell,
                     no_allow_shell,
                 } => {
-                    let allow_shell = allow_shell_override(allow_shell, no_allow_shell);
+                    let allow_shell = allow_override(allow_shell, no_allow_shell);
                     match send_control(&home, ControlRequest::Restart { allow_shell }).await? {
                         ControlResponse::Restarting { log, allow_shell } => {
                             println!("restart scheduled");
@@ -475,17 +503,28 @@ async fn main() -> Result<()> {
                     let code = run_shell_client(&socket).await?;
                     std::process::exit(code);
                 }
+                Commands::Exec { peer, cmd } => {
+                    let socket = match send_control(&home, ControlRequest::Exec { peer }).await? {
+                        ControlResponse::Exec { socket } => socket,
+                        response => bail!("unexpected daemon response: {response:?}"),
+                    };
+                    let code = run_exec_client(&socket, &cmd).await?;
+                    std::process::exit(code);
+                }
                 Commands::Sync { command } => run_sync(&home, command).await?,
                 Commands::Service { command } => match command {
                     ServiceCommands::Install {
                         allow_shell,
                         no_allow_shell,
+                        allow_exec,
+                        no_allow_exec,
                         memory_max_mb,
                     } => {
                         service::install(
                             &home,
                             ServiceInstallOptions {
-                                allow_shell: allow_shell_override(allow_shell, no_allow_shell),
+                                allow_shell: allow_override(allow_shell, no_allow_shell),
+                                allow_exec: allow_override(allow_exec, no_allow_exec),
                                 memory_max_mb,
                             },
                         )?;
@@ -533,6 +572,7 @@ async fn main() -> Result<()> {
                 },
                 Commands::Daemon {
                     allow_shell,
+                    allow_exec,
                     server_session_max_total,
                     server_session_max_per_peer,
                     server_session_detached_ttl_secs,
@@ -541,6 +581,7 @@ async fn main() -> Result<()> {
                         home,
                         daemon_options(
                             allow_shell,
+                            allow_exec,
                             server_session_max_total,
                             server_session_max_per_peer,
                             server_session_detached_ttl_secs,
@@ -709,6 +750,7 @@ fn parse_include(value: Option<&str>) -> Option<Vec<String>> {
     if globs.is_empty() { None } else { Some(globs) }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_status(
     version: &str,
     node_id: &str,
@@ -716,6 +758,7 @@ fn print_status(
     exposed_protocols: &[String],
     dial_sockets: &[PathBuf],
     allow_shell: bool,
+    allow_exec: bool,
     peers: &[PeerReachability],
 ) -> Result<()> {
     println!("version\t{version}");
@@ -730,6 +773,10 @@ fn print_status(
     println!(
         "shell\t{}",
         if allow_shell { "allowed" } else { "disabled" }
+    );
+    println!(
+        "exec\t{}",
+        if allow_exec { "allowed" } else { "disabled" }
     );
     print_peer_reachability(peers);
     Ok(())
@@ -792,10 +839,13 @@ fn joined_or_dash(values: &[String]) -> String {
     }
 }
 
-fn allow_shell_override(allow_shell: bool, no_allow_shell: bool) -> Option<bool> {
-    if allow_shell {
+/// Resolve an enable/disable flag pair into a tri-state override: `Some(true)` to
+/// enable, `Some(false)` to explicitly disable, `None` to leave the persisted
+/// value untouched. Shared by the shell and exec allow flags.
+fn allow_override(enable: bool, disable: bool) -> Option<bool> {
+    if enable {
         Some(true)
-    } else if no_allow_shell {
+    } else if disable {
         Some(false)
     } else {
         None
@@ -804,12 +854,14 @@ fn allow_shell_override(allow_shell: bool, no_allow_shell: bool) -> Option<bool>
 
 fn daemon_options(
     allow_shell: bool,
+    allow_exec: bool,
     server_session_max_total: Option<usize>,
     server_session_max_per_peer: Option<usize>,
     server_session_detached_ttl_secs: Option<u64>,
 ) -> DaemonOptions {
     DaemonOptions {
         allow_shell,
+        allow_exec,
         server_session_max_total,
         server_session_max_per_peer,
         server_session_detached_ttl_secs,
@@ -963,6 +1015,45 @@ async fn run_shell_client(socket: &PathBuf) -> Result<i32> {
     Ok(exit_code)
 }
 
+/// Drive the client side of a `fabric exec` session over the daemon-provided
+/// socket: send the argv, forward the remote stdout/stderr to the local
+/// stdout/stderr on their own streams, and return the remote command's exit code.
+async fn run_exec_client(socket: &PathBuf, cmd: &[String]) -> Result<i32> {
+    let stream = tokio::net::UnixStream::connect(socket).await?;
+    let (mut read, mut write) = stream.into_split();
+    exec::write_client_argv(&mut write, cmd).await?;
+
+    let mut stdout = tokio::io::stdout();
+    let mut stderr = tokio::io::stderr();
+    let mut exit_code = 1;
+
+    while let Some(frame) = exec::read_server_frame(&mut read).await? {
+        match frame {
+            exec::ServerFrame::Stdout(bytes) => {
+                stdout.write_all(&bytes).await?;
+                stdout.flush().await?;
+            }
+            exec::ServerFrame::Stderr(bytes) => {
+                stderr.write_all(&bytes).await?;
+                stderr.flush().await?;
+            }
+            exec::ServerFrame::Error(message) => {
+                stderr.write_all(message.as_bytes()).await?;
+                stderr.write_all(b"\n").await?;
+                stderr.flush().await?;
+            }
+            exec::ServerFrame::Exit(code) => {
+                exit_code = normalize_exit_code(code);
+                break;
+            }
+        }
+    }
+
+    stdout.flush().await?;
+    stderr.flush().await?;
+    Ok(exit_code)
+}
+
 async fn run_debug_echo(socket: PathBuf) -> Result<()> {
     if socket.exists() {
         fs::remove_file(&socket)?;
@@ -1073,6 +1164,9 @@ async fn spawn_daemon(home: &FabricHome, options: DaemonOptions) -> Result<()> {
     command.arg("--home").arg(home.root()).arg("daemon");
     if options.allow_shell {
         command.arg("--allow-shell");
+    }
+    if options.allow_exec {
+        command.arg("--allow-exec");
     }
     if let Some(max_total) = options.server_session_max_total {
         command

@@ -45,6 +45,9 @@ pub enum ControlRequest {
     Shell {
         peer: String,
     },
+    Exec {
+        peer: String,
+    },
     DropTunnelConnections,
     SetTunnelBlocked {
         blocked: bool,
@@ -77,6 +80,8 @@ pub enum ControlResponse {
         exposed_protocols: Vec<String>,
         dial_sockets: Vec<PathBuf>,
         allow_shell: bool,
+        #[serde(default)]
+        allow_exec: bool,
     },
     ReachabilityStatus {
         version: String,
@@ -85,6 +90,8 @@ pub enum ControlResponse {
         exposed_protocols: Vec<String>,
         dial_sockets: Vec<PathBuf>,
         allow_shell: bool,
+        #[serde(default)]
+        allow_exec: bool,
         peers: Vec<PeerReachability>,
     },
     Restarting {
@@ -98,6 +105,9 @@ pub enum ControlResponse {
         addr: String,
     },
     Shell {
+        socket: PathBuf,
+    },
+    Exec {
         socket: PathBuf,
     },
     Pong {

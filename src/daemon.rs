@@ -41,7 +41,7 @@ use crate::{
         validate_server_session_config, validate_tcp_addr,
     },
     control::{ControlRequest, ControlResponse, PeerReachability, SyncEntryStatus},
-    pathwatch, shell,
+    exec, pathwatch, shell,
     sync::{
         self,
         config::SyncPeers,
@@ -227,6 +227,7 @@ pub struct DaemonState {
     network_usable: AtomicBool,
     builtin_echo_hits: AtomicUsize,
     allow_shell: bool,
+    allow_exec: bool,
     incoming_failures: Arc<FailureBackoff>,
     dial_failures: Arc<FailureBackoff>,
     incoming_slots: Arc<Semaphore>,
@@ -246,6 +247,7 @@ pub(crate) struct CurrentEndpoint {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DaemonOptions {
     pub allow_shell: bool,
+    pub allow_exec: bool,
     pub server_session_max_total: Option<usize>,
     pub server_session_max_per_peer: Option<usize>,
     pub server_session_detached_ttl_secs: Option<u64>,
@@ -340,6 +342,12 @@ fn load_persisted_exposures(home: &FabricHome) -> Result<HashMap<Vec<u8>, Exposu
 fn set_config_allow_shell(home: &FabricHome, allow_shell: bool) -> Result<()> {
     let mut config = FabricConfig::load(home)?;
     config.set_allow_shell(allow_shell);
+    config.save(home)
+}
+
+fn set_config_allow_exec(home: &FabricHome, allow_exec: bool) -> Result<()> {
+    let mut config = FabricConfig::load(home)?;
+    config.set_allow_exec(allow_exec);
     config.save(home)
 }
 
@@ -552,8 +560,12 @@ impl DaemonState {
         if options.allow_shell {
             set_config_allow_shell(&home, true)?;
         }
+        if options.allow_exec {
+            set_config_allow_exec(&home, true)?;
+        }
         let config = FabricConfig::load(&home)?;
         let allow_shell = options.allow_shell || config.allow_shell().unwrap_or(false);
+        let allow_exec = options.allow_exec || config.allow_exec().unwrap_or(false);
         let (tunnel_session_limits, tunnel_session_detached_ttl) =
             resolve_server_session_settings(&config, options)?;
         let peer_book = PeerBook::load(&home)?;
@@ -585,6 +597,7 @@ impl DaemonState {
             network_usable: AtomicBool::new(true),
             builtin_echo_hits: AtomicUsize::new(0),
             allow_shell,
+            allow_exec,
             incoming_failures: FailureBackoff::new(
                 INCOMING_FAILURE_INITIAL_BACKOFF,
                 INCOMING_FAILURE_MAX_BACKOFF,
@@ -976,6 +989,7 @@ impl DaemonState {
             exposed_protocols,
             dial_sockets,
             allow_shell: self.allow_shell,
+            allow_exec: self.allow_exec,
         })
     }
 
@@ -990,6 +1004,7 @@ impl DaemonState {
             exposed_protocols,
             dial_sockets,
             allow_shell: self.allow_shell,
+            allow_exec: self.allow_exec,
             peers,
         })
     }
@@ -2284,6 +2299,12 @@ async fn process_control_request(
                 .await?;
             ControlResponse::Shell { socket }
         }
+        ControlRequest::Exec { peer } => {
+            let socket = state
+                .dial_alpn(&peer, exec::EXEC_PROTOCOL, exec::EXEC_ALPN.to_vec(), false)
+                .await?;
+            ControlResponse::Exec { socket }
+        }
         ControlRequest::DropTunnelConnections => {
             state.drop_tunnel_connections();
             ControlResponse::Ok
@@ -2417,6 +2438,12 @@ async fn process_incoming_iroh(incoming: Incoming, state: Arc<DaemonState>) -> R
         handle_builtin_shell(connection, state).await?;
         return Ok(());
     }
+    if alpn == exec::EXEC_ALPN {
+        let connection = accepting.await?;
+        log_connection_paths("builtin_exec_accept", &connection);
+        handle_builtin_exec(connection, state).await?;
+        return Ok(());
+    }
     if alpn == SYNC_ALPN {
         let connection = accepting.await?;
         log_connection_paths("sync_accept", &connection);
@@ -2474,6 +2501,18 @@ async fn handle_builtin_shell(connection: Connection, state: Arc<DaemonState>) -
     Ok(())
 }
 
+async fn handle_builtin_exec(connection: Connection, state: Arc<DaemonState>) -> Result<()> {
+    let (mut send, mut recv) = connection.accept_bi().await?;
+    if state.allow_exec {
+        exec::serve_exec_session(&mut recv, &mut send).await?;
+    } else {
+        exec::serve_exec_disabled(&mut send).await?;
+    }
+    send.finish()?;
+    connection.closed().await;
+    Ok(())
+}
+
 /// Serve the accepting side of a `fabric/sync` reconcile: run the wire server
 /// against the engine's node for the requested sync, then materialize what the
 /// peer pushed us to disk.
@@ -2507,16 +2546,20 @@ async fn handle_sync(connection: Connection, state: Arc<DaemonState>) -> Result<
 }
 
 fn accepted_alpns(exposures: &HashMap<Vec<u8>, Exposure>) -> Vec<Vec<u8>> {
-    let mut alpns = Vec::with_capacity(exposures.len() + 3);
+    let mut alpns = Vec::with_capacity(exposures.len() + 4);
     alpns.push(BUILTIN_ECHO_ALPN.to_vec());
     alpns.push(shell::SHELL_ALPN.to_vec());
+    alpns.push(exec::EXEC_ALPN.to_vec());
     alpns.push(SYNC_ALPN.to_vec());
     alpns.extend(exposures.keys().cloned());
     alpns
 }
 
 fn matches_reserved_alpn(alpn: &[u8]) -> bool {
-    alpn == BUILTIN_ECHO_ALPN || alpn == shell::SHELL_ALPN || alpn == SYNC_ALPN
+    alpn == BUILTIN_ECHO_ALPN
+        || alpn == shell::SHELL_ALPN
+        || alpn == exec::EXEC_ALPN
+        || alpn == SYNC_ALPN
 }
 
 /// The iroh-backed sync transport: resolves peers from `peers.toml` and dials the

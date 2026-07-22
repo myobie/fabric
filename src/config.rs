@@ -447,6 +447,8 @@ pub struct FabricConfig {
     #[serde(default)]
     allow_shell: Option<bool>,
     #[serde(default)]
+    allow_exec: Option<bool>,
+    #[serde(default)]
     server_sessions: ServerSessionConfig,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     peers: Vec<Peer>,
@@ -514,12 +516,20 @@ impl FabricConfig {
         self.allow_shell
     }
 
+    pub fn allow_exec(&self) -> Option<bool> {
+        self.allow_exec
+    }
+
     pub fn server_sessions(&self) -> &ServerSessionConfig {
         &self.server_sessions
     }
 
     pub fn set_allow_shell(&mut self, allow_shell: bool) {
         self.allow_shell = Some(allow_shell);
+    }
+
+    pub fn set_allow_exec(&mut self, allow_exec: bool) {
+        self.allow_exec = Some(allow_exec);
     }
 
     pub fn exposes(&self) -> &[PersistedExpose] {
