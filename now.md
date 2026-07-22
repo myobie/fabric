@@ -71,8 +71,8 @@ Design decisions (why, so they are not re-litigated):
 
 ## Next
 
-0. **ROAMING GAP — the shareability blocker (Nathan 2026-07-22). BUILT + STAGED,
-   awaiting the deploy window.** A peer that changes network/public IP went
+0. **ROAMING GAP — the shareability blocker (Nathan 2026-07-22). DEPLOYED
+   2026-07-22 (see the deploy summary below).** A peer that changes network/public IP went
    unreachable both ways until its daemon was manually restarted. Root cause:
    fabric only reacted to LOCAL netmon changes and never probed peer reachability.
    - **Fix landed (commit `298a593`):** `run_peer_health_loop` echo-probes each peer
@@ -89,30 +89,33 @@ Design decisions (why, so they are not re-litigated):
    - Analysis + reliability data + nix design: `docs/multi-machine-reliability-2026-07-22.md`.
 
 0b. **`fabric exec` — non-interactive remote command execution (Nathan 2026-07-22).
-   BUILT + STAGED, same deploy window as the roaming fix.** `fabric exec <peer> --
+   DEPLOYED 2026-07-22 (see the deploy summary below).** `fabric exec <peer> --
    <cmd>` = scriptable counterpart to `shell` (stream stdout/stderr, propagate
    exit code). DEFAULT-DENY per machine via `allow_exec` (`--allow-exec` on
    up/daemon/service install), separate ALPN `fabric/exec/0`. Validated with a
    local two-node e2e test (allow + deny + stderr split + exit codes); that test
    caught a real bug — `dial_alpn` routed exec through the mux tunnel whose Hello
    frame corrupted the argv; exec now uses the raw dial path like shell.
-   **THIS deploy (ONE Nathan-gated window) = tag `deploy-roaming-exec-bootout`
-   (`1964c99`):** roaming self-heal (`298a593`) + `fabric exec` (`4d02a01`/
-   `4fe8557`) + service-install idempotency (`83a3614`), **ZERO isolation**. Build
-   the Mac binary from THAT tag (not HEAD). **DECOUPLE is FINAL** — cos's one-word
-   answer to end a multi-round fold-in/decouple bounce; do NOT reopen. New binary
-   on Mac AND hetz + `--allow-exec` on hetz so cos can `fabric exec hetzner --
-   <cmd>`. Rollback: `~/.local/bin/fabric.prev` = 9f5391b. Runbook verify:
-   `fabric status` shows `exec allowed` on hetz + `fabric exec hetzner -- echo ok`
-   + `peer_health_probe` telemetry + a laptop roaming self-heal test.
+   **DEPLOYED 2026-07-22 (tag `deploy-roaming-exec-bootout` = `1964c99`):** roaming
+   self-heal (`298a593`) + `fabric exec` (`4d02a01`/`4fe8557`) + service-install
+   idempotency (`83a3614`), ZERO isolation (isolation was decoupled). BOTH machines
+   on `0.2.0+1964c99`: Mac (launchd-managed) + hetz (`fabric-keepalive.service`).
+   Verified both ends — link direct both ways, node identities preserved, roaming
+   `peer_health_probe` firing both directions (each sees the other reachable),
+   `fabric exec hetzner -- echo` exit 0 (cos's test + mine). hetz exec enabled via
+   `allow_exec=true` in its config.toml (keepalive unit passes only `--allow-shell`;
+   both `[[exposes]]` pty-remote + st-sync preserved). Deploy method that made it
+   clean: build-verify-before-swap; Nathan fired the hetz `systemctl --user restart`
+   from ssh (outside the daemon cgroup); rollbacks staged (Mac `fabric.prev`=9f5391b,
+   hetz `fabric.prev`=0.1.7+940afd1 recovered from `/proc`). Remaining: Nathan's
+   laptop-roaming self-heal test.
 
-   **SEPARATE follow-up (its own small validation, NOT this window, NO Nathan
-   window):** dev/prod isolation (`a9b336e`, on main but NOT in the deploy tag):
-   service-install refuses a non-default home, down/restart home-mismatch guard,
-   README FABRIC_HOME-for-dev convention. Standalone validation before it lands
-   live: default/prod-home `service install` still succeeds; a non-default home is
-   refused; `down`/`restart` on an empty home warns. Design:
-   `docs/dev-prod-isolation.md`.
+   **SEPARATE follow-up (on main `a9b336e`, NOT deployed — needs NO Nathan
+   window):** dev/prod isolation: service-install refuses a non-default home,
+   down/restart home-mismatch guard, README FABRIC_HOME-for-dev convention.
+   Standalone validation before it lands live: default/prod-home `service install`
+   still succeeds; a non-default home is refused; empty-home `down`/`restart`
+   warns. Design: `docs/dev-prod-isolation.md`.
 
    **Deferred:** the `fabric dev` subcommand (env convention covers it), the
    Erlang idle-skip probe refinement (low urgency), and `fabric cp`/discovery
