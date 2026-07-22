@@ -71,6 +71,18 @@ Design decisions (why, so they are not re-litigated):
 
 ## Next
 
+0. **ROAMING GAP — the shareability blocker (NEW top priority, Nathan 2026-07-22).**
+   A peer that changes network/public IP goes unreachable both ways until its
+   daemon is manually restarted. Root cause: fabric only reacts to LOCAL netmon
+   changes (`run_network_rehome_loop`, `daemon.rs:1596`) and never actively probes
+   peer reachability (the health poll skips the peer echo — `peer_probe_attempted=false`).
+   Fix: promote a peer-liveness echo probe to always-on and drive the existing
+   recovery ladder (drop tunnels → `network_change()` → recycle) on peer-probe
+   failure. Same change gives continuous latency/direct-vs-relay telemetry (pathwatch,
+   currently gated off via `FABRIC_PATHWATCH_SECS`). Full analysis + reliability
+   data + nix-fabric design: `docs/multi-machine-reliability-2026-07-22.md`.
+   Ready to implement on CoS/Nathan go.
+
 1. **Fleet redeploy before the hetz proof** (CoS-coordinated). The *installed*
    fabric binaries are stale/pre-sync (`~/.local/bin/fabric` was 0.1.7+940afd1).
    A machine only serves/dials sync after its running daemon is **restarted**
