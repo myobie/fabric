@@ -140,6 +140,14 @@ Design decisions (why, so they are not re-litigated):
 
 ## Open items / known gaps
 
+- **Per-peer exec/shell ACL (feature gap, raised 2026-07-24).** `allow_shell` /
+  `allow_exec` live on `FabricConfig` (daemon-global) — enabling either opens the
+  capability to *every* trusted peer. There is no per-peer allow field on `Peer`
+  (peers.toml), so "allow exec from the Air but not from hetz" is not expressible
+  today. Real future work: per-peer capability scoping. README now documents the
+  current global scope.
+- **Backlog (cos, 2026-07-24, do-not-act-yet): unify `peers.toml` + config.toml +
+  `syncs.toml` into ONE config file.** Parked pending greenlight.
 - `bus` tombstone-sweep TTL is not implemented yet (deletes propagate; sweep is a
   no-op). Fine — bus is a later consumer (smalltalk).
 - mtime is carried in the manifest but not restored to disk (ordering is logical,
