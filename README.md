@@ -237,7 +237,18 @@ self-heal.
 
 Both remote shell (`fabric shell <peer>`) and non-interactive remote exec
 (`fabric exec <peer> -- <cmd>`) are **default-deny** — a peer serves them only if
-it has opted in. They are independent (allowing one does not allow the other).
+it has opted in. They are independent (allowing one does not allow the other):
+`fabric shell` needs `allow_shell`, `fabric exec` needs `allow_exec`.
+
+**Check what a daemon serves** by running `fabric status` on it — it prints
+`shell allowed` / `disabled` and `exec allowed` / `disabled`.
+
+These flags are **daemon-global**: enabling `allow_shell` / `allow_exec` opens
+that capability to **every** trusted peer, not a chosen subset. Restricting shell
+or exec to specific peers is not supported today — it is all-or-nothing per
+capability, gated only by the peer allow-list (who is trusted at all). If you need
+per-peer scoping, keep the capability off and reach for it deliberately.
+
 Enable them with flags on `fabric service install`:
 
 ```sh
@@ -260,6 +271,32 @@ going through it). Run it **locally or from an independent shell — not over a
 the restart. Confirm afterward with `fabric status`, which prints `shell allowed`
 and `exec allowed`. (For an unmanaged `fabric up` daemon, use
 `fabric restart --allow-shell` instead of re-installing.)
+
+If `fabric shell <peer>` or `fabric exec <peer> -- …` fails with
+`unknown peer <peer>`, the problem is on the **calling** side, not the target: the
+caller has no trusted peer under that name. Names are per-machine — each machine
+can call the same NodeID whatever it likes — so a peer that resolves on one box
+may be missing, or named differently, on another. Fix it on the caller:
+`fabric add <nodeid> <peer>` then `fabric reload-peers`
+(see [Join An Existing Mesh](#join-an-existing-mesh-add-a-fresh-machine)). This is
+independent of whether the target serves shell/exec.
+
+`fabric shell` gives a **real interactive TTY** (it allocates a PTY on the remote,
+like `ssh -t`), so job control, `stty`, and full-screen programs work.
+`fabric exec` is non-interactive — it runs the command with piped stdio and **no
+TTY**, so `fabric exec <peer> -- bash -i` reports "no job control" / "stdin isn't a
+terminal". That is expected: use `fabric shell` when you want an interactive shell.
+
+**Gotcha — the remote shell runs in the daemon's session, not your login
+session.** `fabric shell` spawns the shell as a child of the remote fabric daemon.
+On a managed install that daemon runs under launchd/systemd — a **non-GUI** session
+with no Keychain/`login` context. A shell-startup (`.bashrc`/`.zshrc`/prompt) that
+depends on the GUI login session — e.g. macOS `security show-keychain-info` on the
+login keychain, `ssh-add`, or anything that blocks waiting for a GUI unlock prompt
+— can **hang** the interactive shell (the connection is fine; the dotfiles are
+stuck). Guard such startup steps so they only run when a GUI login session is
+actually present (e.g. gate Keychain access on `launchctl managername` being
+`Aqua`, or make the step non-blocking) rather than unconditionally in your shell rc.
 
 The service uses the same fabric home, identity, persisted exposes, and trusted
 peer allow-list. It does not install SSH keys or change fabric's authorization
