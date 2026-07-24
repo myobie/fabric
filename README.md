@@ -233,25 +233,33 @@ with the old endpoint in memory; setting the service cap too close to the
 300 MiB recycle threshold can let the OS kill fabric during a successful
 self-heal.
 
-Remote shell serving remains off unless you opt in:
+### Enabling remote shell and exec
+
+Both remote shell (`fabric shell <peer>`) and non-interactive remote exec
+(`fabric exec <peer> -- <cmd>`) are **default-deny** — a peer serves them only if
+it has opted in. They are independent (allowing one does not allow the other).
+Enable them with flags on `fabric service install`:
 
 ```sh
-fabric service install --allow-shell
+fabric service install --allow-shell                # serve remote shell
+fabric service install --allow-shell --allow-exec   # serve both
+fabric service install --no-allow-shell             # persist shell OFF (also --no-allow-exec)
 ```
 
-To force it off in the persisted config:
+**On an already-installed daemon, enable the same way** — just re-run
+`fabric service install` with the flags you want:
 
 ```sh
-fabric service install --no-allow-shell
+fabric service install --allow-shell --allow-exec
 ```
 
-Non-interactive remote command execution (`fabric exec <peer> -- <cmd>`) is a
-separate opt-in, also default-deny; enable it on a peer that should run remote
-commands:
-
-```sh
-fabric service install --allow-exec
-```
+The allow flags are read when the daemon **starts**, so re-installing restarts the
+managed daemon to apply them (a brief interruption to any connections currently
+going through it). Run it **locally or from an independent shell — not over a
+`fabric shell` to that same machine**, which would sever the connection driving
+the restart. Confirm afterward with `fabric status`, which prints `shell allowed`
+and `exec allowed`. (For an unmanaged `fabric up` daemon, use
+`fabric restart --allow-shell` instead of re-installing.)
 
 The service uses the same fabric home, identity, persisted exposes, and trusted
 peer allow-list. It does not install SSH keys or change fabric's authorization
