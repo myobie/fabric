@@ -242,15 +242,31 @@ fn install_launchd_user(home: &FabricHome, spec: &ServiceSpec) -> Result<()> {
     // "Bootstrap failed: 5: Input/output error" and leaves NO daemon running —
     // which, for cos's only path to hetz, is an outage. A re-install must be
     // idempotent and safe to re-run.
-    let _ = Command::new("launchctl")
-        .args(["bootout", &target])
-        .status();
+    // On a FRESH install there is nothing to unload, and launchctl exits non-zero
+    // with "Boot-out failed: 3: No such process" — harmless and confusing. Capture
+    // its output and swallow that case; only surface a REAL bootout failure.
+    if let Ok(output) = Command::new("launchctl").args(["bootout", &target]).output()
+        && !output.status.success()
+    {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !bootout_failure_is_ignorable(output.status.code(), &stderr) {
+            eprint!("{stderr}");
+        }
+    }
     wait_for_launchd_unloaded(&target, LAUNCHD_UNLOAD_TIMEOUT);
     bootstrap_launchd_with_retry(&domain, &plist, &target)?;
     run_command("launchctl", &["enable", &target])?;
     run_command("launchctl", &["kickstart", "-k", &target])?;
     println!("plist\t{}", plist_path.display());
     Ok(())
+}
+
+/// launchctl `bootout` fails when there is nothing to unload — a fresh install or
+/// an already-stopped service — with "No such process" (ESRCH, code 3) or
+/// "Could not find service …". That is expected and harmless; every other failure
+/// (e.g. an I/O error) is worth surfacing.
+fn bootout_failure_is_ignorable(code: Option<i32>, stderr: &str) -> bool {
+    code == Some(3) || stderr.contains("No such process") || stderr.contains("Could not find")
 }
 
 /// True if launchd currently has the service loaded in the domain.
@@ -487,6 +503,25 @@ fn xml_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootout_no_such_process_is_ignorable_but_real_errors_surface() {
+        // Fresh install / already-stopped service — nothing to unload — suppress.
+        assert!(bootout_failure_is_ignorable(
+            Some(3),
+            "Boot-out failed: 3: No such process\n"
+        ));
+        assert!(bootout_failure_is_ignorable(
+            None,
+            "Could not find service \"com.compoundingtech.fabric\" in domain\n"
+        ));
+        // A real failure (e.g. the bootstrap-race I/O error) must still surface.
+        assert!(!bootout_failure_is_ignorable(
+            Some(5),
+            "Boot-out failed: 5: Input/output error\n"
+        ));
+        assert!(!bootout_failure_is_ignorable(Some(1), "some other launchctl error\n"));
+    }
 
     #[test]
     fn default_systemd_unit_uses_one_gib_memory_headroom() -> Result<()> {
